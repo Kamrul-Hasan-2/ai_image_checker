@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-multipart
+transformers
+torch
+torchvision
+Pillow
+qwen-vl-utils
+accelerate
+sentencepiece
+easyocr
+opencv-python
