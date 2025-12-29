@@ -12,6 +12,7 @@ import io
 from typing import Optional
 import uvicorn
 import requests
+import numpy as np
 
 from quality_service import QualityCheckService
 from ocr_service import OCRService
@@ -248,10 +249,9 @@ async def check_image_from_url(request: ImageURLRequest):
         
         checks = quality.get("checks", {})
         opencv_result = {
-            "blur_detection": "no" if checks.get("blur", False) else "yes",
-            "screenshot_check": "yes" if not checks.get("screenshot", True) else "no",
-            "corruption_check": "no" if checks.get("corruption", False) else "yes",
-            "watermark_check": "no" if checks.get("watermark", False) else "yes"
+            "blur_detection": "no" if checks.get("blur", {}).get("passed", False) else "yes",
+            "screenshot_check": "yes" if not checks.get("screenshot_ui", {}).get("passed", True) else "no",
+            "corruption_check": "no" if checks.get("corrupted", {}).get("passed", False) else "yes"
         }
         
         if not quality["passed"]:
@@ -276,18 +276,29 @@ async def check_image_from_url(request: ImageURLRequest):
         text_available = ocr["text_found"]
         extracted_text = ocr.get("full_text", "")
         
+        # Check for promotional text (phone, website, sale keywords)
+        ocr_analysis = ocr.get("analysis", {})
+        has_promotional_ocr = ocr_analysis.get("is_promotional", False)
+        
         ocr_result = {
             "image_extract": extracted_text if extracted_text else "No text found"
         }
         
         if text_available:
             print(f"✓ OCR: Text extracted")
+            if has_promotional_ocr:
+                print(f"  - Promotional content detected in text")
         else:
             print("✓ OCR: No text available")
         
         # STEP 3: CLIP - Category & Risk Detection
         print("\n[3/3] CLIP - Category & Risk Detection...")
         clip_full = clip_service.analyze_image(image)
+        
+        # Detect watermark using OpenCV (more reliable for visual logos)
+        img_array = np.array(image)
+        watermark_result = quality_service.detect_watermark(img_array)
+        has_watermark = watermark_result.get("has_watermark", False)
         
         # Get category
         category = clip_full.get("category_analysis", {})
@@ -297,33 +308,51 @@ async def check_image_from_url(request: ImageURLRequest):
         promo = clip_full.get("promo_analysis", {})
         has_promotional = promo.get("is_promotional", False)
         
+        # Promotional text only if OCR found text AND it contains promotional content
+        # If no text found in OCR, then no promotional text exists
+        if not text_available:
+            is_promotional_final = False  # No text = no promotional text
+        else:
+            is_promotional_final = has_promotional_ocr  # Use only OCR promotional detection
+        
         # Risk analysis
         risk = clip_full["risk_analysis"]
         max_risk = risk["max_risk"]
         risk_category = risk["max_risk_category"]
         risk_level_percent = int(max_risk * 100)
         
+        # Illegal content check
+        illegal_check = clip_full.get("illegal_check", {})
+        is_illegal_detected = illegal_check.get("is_illegal", False)
+        illegal_product = illegal_check.get("illegal_product", None)
+        illegal_confidence = illegal_check.get("confidence", 0)
+        
         # Determine illegal photo status
         is_illegal = "no"
-        if "weapon" in risk_category.lower() or "violent" in risk_category.lower():
+        if is_illegal_detected:
             is_illegal = "yes"
+            risk_level_percent = max(risk_level_percent, 95)  # Boost risk level for illegal items
+        elif "weapon" in risk_category.lower() or "violent" in risk_category.lower():
+            is_illegal = "suspected"
         elif "medical" in risk_category.lower() and max_risk > 0.60:
             is_illegal = "suspected"
         
         # Determine stock photo status (generic product images)
         is_stock_photo = "no"
-        if not has_promotional and max_risk < 0.20:
+        if not is_promotional_final and max_risk < 0.20:
             is_stock_photo = "yes"
         
         clip_result = {
-            "promo_text": "yes" if has_promotional else "no",
+            "promo_text": "yes" if is_promotional_final else "no",
             "stock_photo": is_stock_photo,
             "illegal_photo": is_illegal,
-            "category": top_category
+            "category": top_category,
+            "watermark_check": "yes" if has_watermark else "no"
         }
         
         print(f"✓ CLIP: Category: {top_category}")
-        print(f"✓ CLIP: Promotional: {'Yes' if has_promotional else 'No'}")
+        print(f"✓ CLIP: Promotional: {'Yes' if is_promotional_final else 'No'}")
+        print(f"✓ CLIP: Watermark: {'Yes' if has_watermark else 'No'}")
         print(f"✓ CLIP: Risk Level: {risk_level_percent}%")
         
         # Check if Qwen2B is needed (risk level >= 85)

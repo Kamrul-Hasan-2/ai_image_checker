@@ -62,33 +62,41 @@ class OCRService:
     
     def _analyze_text(self, text_list: List[str]) -> Dict:
         """Analyze extracted text for specific patterns"""
-        full_text_lower = " ".join(text_list).lower()
+        full_text = " ".join(text_list)
+        full_text_lower = full_text.lower()
         
-        # Check for promotional keywords
+        # Promotional keywords (not product names - only sale/discount/contact info)
         promo_keywords = [
-            'sale', 'discount', 'off', '%', 'deal', 'offer', 
-            'free', 'limited', 'buy', 'now', 'special', 'promotion'
+            'sale', 'discount', 'off', '%', 'offer', 'deal', 'promo',
+            'buy now', 'order now', 'call now', 'limited time', 'hurry',
+            'free shipping', 'cash on delivery', 'cod', 'emi available',
+            'lowest price', 'best price', 'special offer', 'clearance'
         ]
         promo_detected = any(keyword in full_text_lower for keyword in promo_keywords)
         
-        # Check for brand indicators
-        brand_indicators = [
-            '®', '™', '©', 'inc', 'ltd', 'corp', 'llc'
-        ]
+        # Check for phone numbers (BD format)
+        import re
+        phone_pattern = r'(?:\+?88)?01[3-9]\d{8}'
+        has_phone = bool(re.search(phone_pattern, full_text))
+        
+        # Check for website links
+        website_pattern = r'(?:www\.|https?://|\.com|\.bd|\.net|\.org)'
+        has_website_link = bool(re.search(website_pattern, full_text_lower))
+        
+        # Check for brand indicators (not promotional)
+        brand_indicators = ['®', '™', '©', 'inc', 'ltd', 'corp', 'llc']
         brand_detected = any(indicator in full_text_lower for indicator in brand_indicators)
         
-        # Check for contact information
-        contact_patterns = ['@', 'www', '.com', '.net', 'http', 'email', 'phone', 'tel']
-        contact_info = any(pattern in full_text_lower for pattern in contact_patterns)
-        
-        # Check for prices
-        has_prices = any(char in full_text_lower for char in ['$', '€', '£', '¥', 'price'])
+        # Check for prices (not promotional by itself)
+        has_prices = any(char in full_text_lower for char in ['৳', 'tk', 'taka', 'price', 'rs'])
         
         return {
             "has_promotional_text": promo_detected,
+            "has_phone_number": has_phone,
+            "has_website_link": has_website_link,
             "has_brand_indicators": brand_detected,
-            "has_contact_info": contact_info,
             "has_prices": has_prices,
+            "is_promotional": promo_detected or has_phone or has_website_link,
             "text_density": "high" if len(text_list) > 10 else "medium" if len(text_list) > 3 else "low"
         }
     

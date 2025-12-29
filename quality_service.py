@@ -33,7 +33,7 @@ class QualityCheckService:
             "aspect_ratio": self._check_aspect_ratio(image),
             "blur": self._check_blur(image),
             "corrupted": self._check_corrupted(image),
-            "screenshot_ui": self._check_screenshot_ui(image),
+            "screenshot_ui": self._check_screenshot_ui(image)
         }
         
         # Determine overall pass/fail
@@ -191,6 +191,92 @@ class QualityCheckService:
             "reason": "Not a screenshot",
             "details": {"edge_density": edge_density}
         }
+    
+    def detect_watermark(self, img_array: np.ndarray) -> Dict:
+        """
+        Detect 3rd party website watermarks (bikroy, daraz, etc.)
+        Does NOT detect product names or brand logos
+        """
+        try:
+            # Convert to grayscale
+            if len(img_array.shape) == 3:
+                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = img_array
+            
+            height, width = gray.shape
+            
+            # Apply edge detection
+            edges = cv2.Canny(gray, 50, 150)
+            
+            # Check ONLY corners where website watermarks typically appear
+            # Exclude center region (where product logos usually are)
+            corner_regions = {
+                'top_left': edges[0:height//5, 0:width//5],
+                'top_right': edges[0:height//5, 4*width//5:width],
+                'bottom_left': edges[4*height//5:height, 0:width//5],
+                'bottom_right': edges[4*height//5:height, 4*width//5:width]
+            }
+            
+            watermark_detected = False
+            watermark_location = None
+            max_density = 0
+            
+            for location, region in corner_regions.items():
+                if region.size == 0:
+                    continue
+                
+                # Calculate edge density
+                edge_density = np.sum(region > 0) / region.size
+                
+                # Website watermarks have higher edge density (0.12-0.30)
+                # This filters out simple product names
+                if edge_density > 0.12 and edge_density < 0.30:
+                    # Check for URL-like patterns (dots, multiple words)
+                    horizontal_edges = np.sum(region, axis=0)
+                    vertical_edges = np.sum(region, axis=1)
+                    
+                    # Website watermarks often have more complex patterns
+                    if np.max(horizontal_edges) > region.shape[0] * 15 and np.std(horizontal_edges) > 5:
+                        watermark_detected = True
+                        if edge_density > max_density:
+                            max_density = edge_density
+                            watermark_location = location
+            
+            # Additional check: Look for semi-transparent overlays ONLY in corners
+            if not watermark_detected:
+                corner_regions_bright = [
+                    gray[0:height//5, 0:width//5],
+                    gray[0:height//5, 4*width//5:width],
+                    gray[4*height//5:height, 0:width//5],
+                    gray[4*height//5:height, 4*width//5:width]
+                ]
+                
+                for region in corner_regions_bright:
+                    if region.size == 0:
+                        continue
+                    std_dev = np.std(region)
+                    mean_val = np.mean(region)
+                    
+                    # Very specific for semi-transparent website overlays
+                    # Low variance + high brightness + small region = watermark
+                    if std_dev < 25 and mean_val > 200 and region.size < (height * width) / 20:
+                        watermark_detected = True
+                        break
+            
+            return {
+                "has_watermark": watermark_detected,
+                "location": watermark_location,
+                "confidence": max_density
+            }
+            
+        except Exception as e:
+            print(f"Warning: Watermark detection failed - {e}")
+            return {
+                "has_watermark": False,
+                "location": None,
+                "confidence": 0
+            }
     
     def _check_watermark(self, img_array: np.ndarray) -> bool:
         """
