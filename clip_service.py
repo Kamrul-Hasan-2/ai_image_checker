@@ -23,26 +23,144 @@ class CLIPService:
         
         # Define categories for classification
         self.categories = [
-            "product photo",
-            "person or people",
-            "landscape or nature",
-            "food or beverage",
-            "technology or electronics",
-            "fashion or clothing",
-            "interior design",
-            "vehicle or transportation",
-            "art or illustration",
-            "text or document"
-        ]
+                "Computer » PC & Laptop » Laptop",
+                "Computer » PC & Laptop » Used Laptop",
+                "Computer » PC & Laptop » PC Builder",
+                "Computer » PC & Laptop » Desktop PC",
+                "Computer » PC & Laptop » Mini PC",
+                "Computer » PC & Laptop » Graphics Tablet",
+                "Computer » PC & Laptop » Signature Pad",
+                "Computer » PC & Laptop » Stylus Pen",
+                "Computer » PC & Laptop » Tablet",
+                "Computer » PC & Laptop » Server",
+                "Computer » PC & Laptop » Server Rack",
+                "Computer » PC & Laptop » Computer Repair",
+
+                "Computer » PC Parts » Processor",
+                "Computer » PC Parts » Motherboard",
+                "Computer » PC Parts » RAM",
+                "Computer » PC Parts » Hard Disk",
+                "Computer » PC Parts » SSD",
+                "Computer » PC Parts » Graphics Card",
+                "Computer » PC Parts » Mouse",
+                "Computer » PC Parts » Keyboard",
+                "Computer » PC Parts » DVD Writer",
+                "Computer » PC Parts » Computer Casing",
+                "Computer » PC Parts » CPU Cooler",
+                "Computer » PC Parts » Internet Modem",
+                "Computer » PC Parts » Webcam",
+                "Computer » PC Parts » TV Card",
+                "Computer » PC Parts » Pendrive",
+                "Computer » PC Parts » PC Cable",
+                "Computer » PC Parts » Power Supply",
+                "Computer » PC Parts » USB Hub",
+                "Computer » PC Parts » Card Reader",
+                "Computer » PC Parts » Blank Disk",
+                "Computer » PC Parts » Sound Card",
+                "Computer » PC Parts » Thermal Paste",
+                "Computer » PC Parts » Mouse Pad",
+
+                "Computer » Laptop Accessories » Laptop Battery",
+                "Computer » Laptop Accessories » Laptop Charger",
+                "Computer » Laptop Accessories » Laptop Bag",
+                "Computer » Laptop Accessories » Laptop Cooler",
+                "Computer » Laptop Accessories » Laptop Display",
+                "Computer » Laptop Accessories » Laptop Keyboard",
+                "Computer » Laptop Accessories » Laptop Table",
+
+                "Computer » Networking » Router",
+                "Computer » Networking » Wireless Access Point",
+                "Computer » Networking » Radio Link",
+                "Computer » Networking » WiFi Repeater",
+                "Computer » Networking » Network Switch",
+                "Computer » Networking » WiFi Adapter",
+                "Computer » Networking » Network Storage",
+                "Computer » Networking » Patch Panel",
+                "Computer » Networking » Network Cable",
+                "Computer » Networking » Crimping Tool",
+                "Computer » Networking » HDMI Extender",
+                "Computer » Networking » Cable Tester",
+                "Computer » Networking » RJ45 Connector",
+                "Computer » Networking » Splicer Machine",
+                "Computer » Networking » Wireless Antenna",
+                "Computer » Networking » Media Converter",
+                "Computer » Networking » KVM Switch",
+                "Computer » Networking » Face Plate",
+                "Computer » Networking » Networking Accessories",
+                "Computer » Networking » Network Support",
+
+                "Computer » Projection » Projector",
+                "Computer » Projection » Digital Whiteboard",
+                "Computer » Projection » Projector Screen",
+                "Computer » Projection » Projector Mount",
+                "Computer » Projection » Projector Lamp",
+                "Computer » Projection » Wireless Presenter",
+                "Computer » Projection » Projector Repair",
+                "Computer » Projection » Projector Rental",
+                "Computer » Projection » Projector Accessories",
+
+                "Computer » Monitor » Monitor",
+
+                "Computer » Print & Scan » Photocopier",
+                "Computer » Print & Scan » Printer",
+                "Computer » Print & Scan » Scanner",
+                "Computer » Print & Scan » Banner Printer",
+                "Computer » Print & Scan » POS Printer",
+                "Computer » Print & Scan » POS Machine",
+                "Computer » Print & Scan » Barcode Printer",
+                "Computer » Print & Scan » Barcode Scanner",
+                "Computer » Print & Scan » ID Card Printer",
+                "Computer » Print & Scan » Digital Duplicator",
+                "Computer » Print & Scan » Cartridge",
+                "Computer » Print & Scan » Thermal Paper Roll",
+                "Computer » Print & Scan » PVC Card",
+                "Computer » Print & Scan » Printer Paper",
+                "Computer » Print & Scan » Printer Parts",
+                "Computer » Print & Scan » Copier Repair",
+                "Computer » Print & Scan » Printer Repair",
+                "Computer » Print & Scan » Copier Parts",
+                "Computer » Print & Scan » Printing Accessories",
+
+                "Computer » Office Electronics » Paper Shredder",
+                "Computer » Office Electronics » Money Counting Machine",
+                "Computer » Office Electronics » Cash Register",
+                "Computer » Office Electronics » Cash Drawer",
+                "Computer » Office Electronics » Fake Note Detector",
+                "Computer » Office Electronics » Laminating Machine",
+                "Computer » Office Electronics » Spiral Binding Machine",
+                "Computer » Office Electronics » Paper Cutting Machine",
+
+                "Computer » Software » Antivirus",
+                "Computer » Software » App Development",
+                "Computer » Software » Business Software",
+                "Computer » Software » POS Software",
+                "Computer » Software » Inventory Software",
+                "Computer » Software » Accounting Software",
+                "Computer » Software » e-Commerce Website",
+                "Computer » Software » Microsoft Office",
+                "Computer » Software » Educational Software",
+                "Computer » Software » Microsoft Windows",
+
+                "Computer » Web Service » Web Hosting",
+                "Computer » Web Service » Domain Name",
+
+                "Computer » Digital Marketing » Digital Display",
+                "Computer » Digital Marketing » Digital Marketing Service",
+                "Computer » Digital Marketing » LED Sign Board",
+
+                "More » Everything Else » Online Media",
+                "More » Everything Else » Everything Else"
+            ]
+
         
-        # Define risk categories
+        # Define risk categories (NEW REQUIREMENTS)
         self.risk_categories = [
-            "safe content",
-            "inappropriate content",
-            "violent content",
-            "adult content",
-            "disturbing content",
-            "graphic content"
+            "safe general content",
+            "promotional advertisement",
+            "weapons or firearms",
+            "medical drugs or substances",
+            "financial stock trading",
+            "violent or graphic content"
         ]
         
         # Promo banner indicators
@@ -91,7 +209,11 @@ class CLIPService:
         }
     
     def get_risk_scores(self, image: Image.Image) -> Dict:
-        """Assess content risk using CLIP"""
+        """
+        Assess content risk using CLIP
+        Returns max risk score from: promo/weapon/medical/stock categories
+        Threshold: risk >= 0.70 requires escalation
+        """
         inputs = self.processor(
             text=self.risk_categories,
             images=image,
@@ -105,12 +227,30 @@ class CLIPService:
             probs = logits_per_image.softmax(dim=1)[0]
         
         scores = {cat: float(prob) for cat, prob in zip(self.risk_categories, probs)}
-        risk_level = "high" if scores["safe content"] < 0.5 else "low"
+        
+        # Calculate max risk (excluding "safe general content")
+        risk_scores = {
+            "promo": scores["promotional advertisement"],
+            "weapon": scores["weapons or firearms"],
+            "medical": scores["medical drugs or substances"],
+            "stock": scores["financial stock trading"],
+            "violent": scores["violent or graphic content"]
+        }
+        
+        max_risk_category = max(risk_scores, key=risk_scores.get)
+        max_risk_score = risk_scores[max_risk_category]
+        
+        # Determine action based on threshold
+        requires_escalation = max_risk_score >= 0.70
         
         return {
             "scores": scores,
-            "risk_level": risk_level,
-            "safe_content_score": scores["safe content"]
+            "risk_scores": risk_scores,
+            "max_risk": max_risk_score,
+            "max_risk_category": max_risk_category,
+            "safe_score": scores["safe general content"],
+            "requires_escalation": requires_escalation,
+            "action": "ESCALATE_TO_QWEN2B" if requires_escalation else "APPROVE"
         }
     
     def detect_promo_banner(self, image: Image.Image) -> Dict:

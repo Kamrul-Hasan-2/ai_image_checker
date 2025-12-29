@@ -1,29 +1,30 @@
 """
 FastAPI Server for AI Image Checker
-3-Step Pipeline: EasyOCR → CLIP → Qwen2-VL
+5-Step Smart Pipeline with Escalation Logic
 """
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from PIL import Image
 import io
-from typing import Optional, List
+from typing import Optional
 import uvicorn
+import requests
 
+from quality_service import QualityCheckService
+from ocr_service import OCRService
 from clip_service import CLIPService
 from qwen_service import Qwen2VLService
-from ocr_service import OCRService
 
 
-# Initialize FastAPI app
 app = FastAPI(
-    title="AI Image Checker",
-    description="3-Step Pipeline: EasyOCR → CLIP → Qwen2-VL",
-    version="2.0.0"
+    title="AI Image Checker - Smart Pipeline",
+    description="5-Step Escalation: Quality → OCR → CLIP → Qwen2B → Qwen7B",
+    version="3.0.0"
 )
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,335 +33,366 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global model instances (loaded on startup)
+# Global services
+quality_service: Optional[QualityCheckService] = None
 ocr_service: Optional[OCRService] = None
 clip_service: Optional[CLIPService] = None
-qwen_service: Optional[Qwen2VLService] = None
+qwen2b_service: Optional[Qwen2VLService] = None
+qwen7b_service: Optional[Qwen2VLService] = None
+
+
+class ImageURLRequest(BaseModel):
+    image_url: str
 
 
 @app.on_event("startup")
 async def startup_event():
-    """Load all models in sequence"""
-    global ocr_service, clip_service, qwen_service
+    """Load all models"""
+    global quality_service, ocr_service, clip_service, qwen2b_service, qwen7b_service
     
-    print("=" * 60)
-    print("Starting AI Image Checker Server")
-    print("=" * 60)
+    print("=" * 70)
+    print("AI IMAGE CHECKER - SMART PIPELINE v3.0")
+    print("=" * 70)
     
-    # Step 1: Load EasyOCR model
-    print("\n[Step 1/3] Loading EasyOCR...")
+    print("\n[1/5] OpenCV Quality Check...")
+    quality_service = QualityCheckService()
+    
+    print("\n[2/5] EasyOCR (CPU)...")
     ocr_service = OCRService(languages=['en'])
     
-    # Step 2: Load CLIP model
-    print("\n[Step 2/3] Loading CLIP model...")
+    print("\n[3/5] CLIP (CPU)...")
     clip_service = CLIPService(model_name="openai/clip-vit-base-patch32")
     
-    # Step 3: Load Qwen2-VL model
-    print("\n[Step 3/3] Loading Qwen2-VL model...")
-    qwen_service = Qwen2VLService(model_name="Qwen/Qwen2-VL-2B-Instruct")
+    print("\n[4/5] Qwen2-VL-2B (GPU)...")
+    qwen2b_service = Qwen2VLService(model_name="Qwen/Qwen2-VL-2B-Instruct")
     
-    print("\n" + "=" * 60)
-    print("✓ All models loaded successfully!")
-    print("Pipeline: EasyOCR → CLIP → Qwen2-VL")
-    print("Server ready to accept requests")
-    print("=" * 60)
+    # print("\n[5/5] Qwen2-VL-7B (GPU)...")
+    # qwen7b_service = Qwen2VLService(model_name="Qwen/Qwen2-VL-7B-Instruct")
+    
+    print("\n" + "=" * 70)
+    print("✓ MODELS LOADED (4-Step Pipeline: Quality→OCR→CLIP→Qwen2B)")
+    print("Note: Qwen7B disabled to reduce memory usage")
+    print("=" * 70)
 
 
 @app.get("/")
 async def root():
-    """Health check endpoint"""
     return {
         "status": "healthy",
-        "service": "AI Image Checker",
-        "version": "2.0.0",
-        "pipeline": "EasyOCR → CLIP → Qwen2-VL",
+        "version": "3.0.0",
+        "pipeline": "Quality → OCR → CLIP → Qwen2B (7B disabled)",
+        "thresholds": {"clip": 0.70, "qwen2b": 0.85}
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "version": "3.0.0",
+        "pipeline": "Quality → OCR → CLIP → Qwen2B (7B disabled)",
         "models": {
-            "step1_ocr": "loaded" if ocr_service else "not loaded",
-            "step2_clip": "loaded" if clip_service else "not loaded",
-            "step3_qwen2vl": "loaded" if qwen_service else "not loaded"
+            "Step 1: Quality": "✓ Loaded",
+            "Step 2: OCR": "✓ Loaded",
+            "Step 3: CLIP": "✓ Loaded",
+            "Step 4: Qwen2B": "✓ Loaded"
         }
     }
 
 
-@app.post("/analyze/pipeline")
-async def full_pipeline_analysis(file: UploadFile = File(...)):
+@app.post("/analyze")
+async def smart_analysis(file: UploadFile = File(...)):
     """
-    COMPLETE 3-STEP PIPELINE:
-    ✓ Step 1: EasyOCR - Extract text from image
-    ✓ Step 2: CLIP - Fast category, risk scoring, brand/logo similarity, promo detection
-    ✓ Step 3: Qwen2-VL - Final moderation decision with explanations
+    SMART 4-STEP PIPELINE:
+    1. Quality Check → STOP if fails
+    2. OCR → Check text availability
+    3. CLIP → Detect promotional content & category
+    4. Qwen2B → Final moderation decision
     """
     try:
-        # Read and process image
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         
-        print(f"\n{'='*60}")
-        print(f"Processing: {file.filename}")
-        print(f"{'='*60}")
+        log = []
+        print(f"\n{'='*70}\nPROCESSING: {file.filename}\n{'='*70}")
         
-        # ===== STEP 1: EasyOCR - Text Extraction =====
-        print("\n[Step 1/3] Running EasyOCR text extraction...")
-        ocr_result = ocr_service.extract_text(image)
-        print(f"✓ Text regions found: {ocr_result['text_count']}")
-        if ocr_result['full_text']:
-            print(f"✓ Sample text: {ocr_result['full_text'][:80]}...")
-        print(f"✓ Has promotional text: {ocr_result['analysis']['has_promotional_text']}")
-        print(f"✓ Has brand indicators: {ocr_result['analysis']['has_brand_indicators']}")
+        # STEP 1: Quality
+        print("\n[1/4] Quality Check...")
+        quality = quality_service.check_image(image, len(contents))
+        log.append({"step": 1, "service": "Quality", "passed": quality["passed"], "checks": quality["checks"]})
         
-        # ===== STEP 2: CLIP - Fast Analysis =====
-        print("\n[Step 2/3] Running CLIP analysis...")
-        clip_result = clip_service.analyze_image(image)
-        print(f"✓ Category: {clip_result['category_analysis']['top_category']}")
-        print(f"✓ Risk level: {clip_result['risk_analysis']['risk_level']}")
-        print(f"✓ Promo detected: {clip_result['promo_analysis']['is_promotional']}")
-        print(f"✓ Safe content score: {clip_result['risk_analysis']['safe_content_score']:.2f}")
+        if not quality["passed"]:
+            print(f"✗ STOPPED: Quality check failed - {quality['reason']}")
+            return JSONResponse(content={
+                "success": True,
+                "filename": file.filename,
+                "final_decision": "REJECT",
+                "reason": f"Quality check failed: {quality['reason']}",
+                "stopped_at": 1,
+                "quality_check": quality,
+                "log": log
+            })
+        print("✓ Quality: Passed")
         
-        # ===== STEP 3: Qwen2-VL - Final Decision =====
-        print("\n[Step 3/3] Running Qwen2-VL final moderation...")
-        # Combine OCR and CLIP results for context
-        combined_context = {
-            "ocr_analysis": ocr_result,
-            "clip_analysis": clip_result
-        }
-        moderation_result = qwen_service.moderate_image(image, combined_context)
-        print(f"✓ Final decision: {moderation_result.get('decision', 'UNKNOWN')}")
-        print(f"✓ Confidence: {moderation_result.get('confidence', 0)}%")
-        print(f"{'='*60}\n")
+        # STEP 2: OCR
+        print("\n[2/4] OCR - Text Detection...")
+        ocr = ocr_service.extract_text(image)
+        text_available = ocr["text_found"]
+        text_count = ocr.get("text_count", 0)
         
-        return JSONResponse(content={
-            "success": True,
-            "filename": file.filename,
-            "pipeline_results": {
-                "step1_ocr": {
-                    "text_found": ocr_result['text_found'],
-                    "text_count": ocr_result['text_count'],
-                    "full_text": ocr_result['full_text'],
-                    "analysis": ocr_result['analysis']
-                },
-                "step2_clip": {
-                    "category": clip_result['category_analysis'],
-                    "risk": clip_result['risk_analysis'],
-                    "promo": clip_result['promo_analysis']
-                },
-                "step3_qwen2vl": moderation_result
-            },
-            "final_summary": {
-                "text_extracted": ocr_result['full_text'][:200] if ocr_result['full_text'] else "No text found",
-                "has_promotional_content": ocr_result['analysis']['has_promotional_text'] or clip_result['promo_analysis']['is_promotional'],
-                "category": clip_result['category_analysis']['top_category'],
-                "risk_level": clip_result['risk_analysis']['risk_level'],
-                "final_decision": moderation_result.get('decision', 'UNKNOWN'),
-                "decision_confidence": moderation_result.get('confidence', 0),
-                "explanation": moderation_result.get('explanation', '')
-            }
+        log.append({
+            "step": 2, 
+            "service": "OCR", 
+            "text_available": text_available,
+            "text_count": text_count
         })
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/step1/ocr")
-async def step1_ocr_only(file: UploadFile = File(...)):
-    """
-    Step 1 Only: EasyOCR text extraction
-    """
-    try:
-        contents = await file.read()
-        image = Image.open(io.BytesIO(contents)).convert("RGB")
         
-        ocr_result = ocr_service.extract_text(image)
+        if text_available:
+            print(f"✓ OCR: Text available ({text_count} regions)")
+        else:
+            print("✓ OCR: No text available")
         
-        return JSONResponse(content={
-            "success": True,
-            "filename": file.filename,
-            "step": 1,
-            "service": "EasyOCR",
-            "result": ocr_result
-        })
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/step2/clip")
-async def step2_clip_only(file: UploadFile = File(...)):
-    """
-    Step 2 Only: CLIP analysis
-    - Fast category scoring
-    - Risk assessment  
-    - Brand/logo similarity
-    - Promo banner detection
-    """
-    try:
-        contents = await file.read()
-        image = Image.open(io.BytesIO(contents)).convert("RGB")
+        # STEP 3: CLIP - Category & Promotional Detection
+        print("\n[3/4] CLIP - Category & Promotional Detection...")
+        clip_full = clip_service.analyze_image(image)
         
-        clip_result = clip_service.analyze_image(image)
+        # Get category
+        category = clip_full.get("category_analysis", {})
+        top_category = category.get("top_category", "Unknown")
         
-        return JSONResponse(content={
-            "success": True,
-            "filename": file.filename,
-            "step": 2,
+        # Check promotional content
+        promo = clip_full.get("promo_analysis", {})
+        has_promotional = promo.get("is_promotional", False)
+        
+        # Risk analysis
+        risk = clip_full["risk_analysis"]
+        
+        log.append({
+            "step": 3, 
             "service": "CLIP",
-            "result": clip_result
+            "category": top_category,
+            "has_promotional": has_promotional,
+            "risk_score": risk["max_risk"],
+            "risk_category": risk["max_risk_category"]
         })
+        
+        print(f"✓ CLIP: Category: {top_category}")
+        print(f"✓ CLIP: Promotional: {'Yes' if has_promotional else 'No'}")
+        print(f"✓ CLIP: Risk: {risk['max_risk']:.2f} ({risk['max_risk_category']})")
+        
+        # STEP 4: Qwen2B - Final Decision
+        print("\n[4/4] Qwen2-VL-2B - Final Moderation...")
+        ctx2b = {"ocr_analysis": ocr, "clip_analysis": clip_full}
+        qwen2b = qwen2b_service.moderate_image(image, ctx2b)
+        
+        decision = qwen2b.get("decision", "UNKNOWN")
+        confidence = qwen2b.get("confidence", 0)
+        
+        log.append({
+            "step": 4, 
+            "service": "Qwen2B", 
+            "decision": decision,
+            "confidence": confidence
+        })
+        
+        print(f"✓ FINAL DECISION: {decision} (Confidence: {confidence}%)")
+        
+        # Return only Qwen2B result
+        return JSONResponse(content=qwen2b)
+        
+        # # STEP 5: Qwen7B (DISABLED - Model not loaded)
+        # print("\n[5/5] Qwen2-VL-7B...")
+        # ctx7b = {**ctx2b, "qwen2b_decision": qwen2b}
+        # qwen7b = qwen7b_service.moderate_image(image, ctx7b)
+        # log.append({"step": 5, "service": "Qwen7B", "decision": qwen7b.get("decision")})
+        # print(f"✓ FINAL: {qwen7b.get('decision')}")
+        # 
+        # return JSONResponse(content={
+        #     "success": True,
+        #     "filename": file.filename,
+        #     "final_decision": qwen7b.get("decision"),
+        #     "reason": qwen7b.get("explanation"),
+        #     "confidence": qwen7b.get("confidence"),
+        #     "stopped_at": 5,
+        #     "escalation": "Full pipeline",
+        #     "log": log
+        # })
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/step3/qwen")
-async def step3_qwen_only(file: UploadFile = File(...)):
+@app.post("/api/ai_check_detectction")
+async def check_image_from_url(request: ImageURLRequest):
     """
-    Step 3 Only: Qwen2-VL moderation
-    - Final moderation decision
-    - Detailed explanations
+    POST endpoint - Send image URL in JSON body: {"image_url": "https://..."}
+    Returns AI moderation result
     """
     try:
-        contents = await file.read()
+        img_url = request.image_url
+        
+        # Download image from URL
+        print(f"\n{'='*70}\nDOWNLOADING: {img_url}\n{'='*70}")
+        response = requests.get(img_url, timeout=10)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Failed to download image: {response.status_code}")
+        
+        contents = response.content
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         
-        moderation_result = qwen_service.moderate_image(image)
+        print(f"\n{'='*70}\nPROCESSING IMAGE\n{'='*70}")
         
-        return JSONResponse(content={
-            "success": True,
-            "filename": file.filename,
-            "step": 3,
-            "service": "Qwen2-VL",
-            "result": moderation_result
-        })
+        # STEP 1: OpenCV Quality Check
+        print("\n[1/3] Quality Check...")
+        quality = quality_service.check_image(image, len(contents))
+        
+        checks = quality.get("checks", {})
+        opencv_result = {
+            "blur_detection": "no" if checks.get("blur", False) else "yes",
+            "screenshot_check": "yes" if not checks.get("screenshot", True) else "no",
+            "corruption_check": "no" if checks.get("corruption", False) else "yes",
+            "watermark_check": "no" if checks.get("watermark", False) else "yes"
+        }
+        
+        if not quality["passed"]:
+            print(f"✗ Quality check failed - {quality['reason']}")
+            return JSONResponse(content={
+                "opencv": opencv_result,
+                "ocr": {"image_extract": ""},
+                "clip": {
+                    "promo_text": "unknown",
+                    "stock_photo": "unknown",
+                    "illegal_photo": "unknown",
+                    "category": "Quality Check Failed"
+                },
+                "risk_level": 0,
+                "qwen2b_called": False
+            })
+        print("✓ Quality: Passed")
+        
+        # STEP 2: OCR - Text Detection
+        print("\n[2/3] OCR - Text Detection...")
+        ocr = ocr_service.extract_text(image)
+        text_available = ocr["text_found"]
+        extracted_text = ocr.get("full_text", "")
+        
+        ocr_result = {
+            "image_extract": extracted_text if extracted_text else "No text found"
+        }
+        
+        if text_available:
+            print(f"✓ OCR: Text extracted")
+        else:
+            print("✓ OCR: No text available")
+        
+        # STEP 3: CLIP - Category & Risk Detection
+        print("\n[3/3] CLIP - Category & Risk Detection...")
+        clip_full = clip_service.analyze_image(image)
+        
+        # Get category
+        category = clip_full.get("category_analysis", {})
+        top_category = category.get("top_category", "Unknown")
+        
+        # Check promotional content
+        promo = clip_full.get("promo_analysis", {})
+        has_promotional = promo.get("is_promotional", False)
+        
+        # Risk analysis
+        risk = clip_full["risk_analysis"]
+        max_risk = risk["max_risk"]
+        risk_category = risk["max_risk_category"]
+        risk_level_percent = int(max_risk * 100)
+        
+        # Determine illegal photo status
+        is_illegal = "no"
+        if "weapon" in risk_category.lower() or "violent" in risk_category.lower():
+            is_illegal = "yes"
+        elif "medical" in risk_category.lower() and max_risk > 0.60:
+            is_illegal = "suspected"
+        
+        # Determine stock photo status (generic product images)
+        is_stock_photo = "no"
+        if not has_promotional and max_risk < 0.20:
+            is_stock_photo = "yes"
+        
+        clip_result = {
+            "promo_text": "yes" if has_promotional else "no",
+            "stock_photo": is_stock_photo,
+            "illegal_photo": is_illegal,
+            "category": top_category
+        }
+        
+        print(f"✓ CLIP: Category: {top_category}")
+        print(f"✓ CLIP: Promotional: {'Yes' if has_promotional else 'No'}")
+        print(f"✓ CLIP: Risk Level: {risk_level_percent}%")
+        
+        # Check if Qwen2B is needed (risk level >= 85)
+        qwen2b_result = None
+        qwen2b_called = False
+        
+        if risk_level_percent >= 85:
+            print(f"\n[4/4] ⚠ Risk Level {risk_level_percent}% - Calling Qwen2-VL-2B...")
+            ctx2b = {"ocr_analysis": ocr, "clip_analysis": clip_full}
+            qwen2b_result = qwen2b_service.moderate_image(image, ctx2b)
+            qwen2b_called = True
+            
+            decision = qwen2b_result.get("decision", "UNKNOWN")
+            confidence = qwen2b_result.get("confidence", 0)
+            
+            print(f"✓ QWEN2B DECISION: {decision} (Confidence: {confidence}%)")
+        else:
+            print(f"✓ Risk Level {risk_level_percent}% - No Qwen2B needed")
+        
+        # Build final response
+        final_response = {
+            "opencv": opencv_result,
+            "ocr": ocr_result,
+            "clip": clip_result,
+            "risk_level": risk_level_percent,
+            "qwen2b_called": qwen2b_called
+        }
+        
+        # Add Qwen2B result if called
+        if qwen2b_called and qwen2b_result:
+            final_response["qwen2b"] = {
+                "decision": qwen2b_result.get("decision", "UNKNOWN"),
+                "confidence": qwen2b_result.get("confidence", 0),
+                "explanation": qwen2b_result.get("explanation", ""),
+                "violations": qwen2b_result.get("violations", []),
+                "recommended_action": qwen2b_result.get("recommended_action", "")
+            }
+        
+        return JSONResponse(content=final_response)
     
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/compare/similarity")
-async def compare_similarity(
-    file1: UploadFile = File(...),
-    file2: UploadFile = File(...)
-):
-    """
-    Compare two images for brand/logo similarity using CLIP
-    """
-    try:
-        contents1 = await file1.read()
-        contents2 = await file2.read()
-        
-        image1 = Image.open(io.BytesIO(contents1)).convert("RGB")
-        image2 = Image.open(io.BytesIO(contents2)).convert("RGB")
-        
-        result = clip_service.compare_brand_similarity(image1, image2)
-        
-        return JSONResponse(content={
-            "success": True,
-            "file1": file1.filename,
-            "file2": file2.filename,
-            "similarity": result
-        })
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/compare/text")
-async def compare_with_text(
-    file: UploadFile = File(...),
-    descriptions: str = Form(...)
-):
-    """
-    Compare image with text descriptions using CLIP (for brand matching)
-    descriptions: comma-separated text descriptions
-    """
-    try:
-        contents = await file.read()
-        image = Image.open(io.BytesIO(contents)).convert("RGB")
-        
-        # Split descriptions
-        text_list = [desc.strip() for desc in descriptions.split(",")]
-        
-        result = clip_service.compare_with_text(image, text_list)
-        
-        return JSONResponse(content={
-            "success": True,
-            "filename": file.filename,
-            "text_matching": result
-        })
-    
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=400, detail=f"Failed to download image: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/dispute")
-async def resolve_dispute(
-    file: UploadFile = File(...),
-    initial_decision: str = Form(...),
-    dispute_reason: str = Form(...)
-):
-    """
-    Dispute resolution using complete pipeline
-    initial_decision: APPROVE or REJECT
-    dispute_reason: User's reason for disputing
-    """
+async def dispute(file: UploadFile = File(...), decision: str = Form(...), reason: str = Form(...)):
+    """Dispute resolution using Qwen2B (7B not loaded)"""
     try:
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         
-        # Run OCR and CLIP for context
-        ocr_result = ocr_service.extract_text(image)
-        clip_result = clip_service.analyze_image(image)
+        ocr = ocr_service.extract_text(image)
+        clip_full = clip_service.analyze_image(image)
+        ctx = {"ocr_analysis": ocr, "clip_analysis": clip_full}
         
-        combined_context = {
-            "ocr_analysis": ocr_result,
-            "clip_analysis": clip_result
-        }
-        
-        # Resolve dispute with Qwen2-VL
-        result = qwen_service.resolve_dispute(
-            image,
-            initial_decision,
-            dispute_reason,
-            combined_context
-        )
+        result = qwen2b_service.resolve_dispute(image, decision, reason, ctx)
         
         return JSONResponse(content={
             "success": True,
             "filename": file.filename,
-            "dispute_resolution": result
+            "dispute_resolution": result,
+            "model": "Qwen2B",
+            "note": "Using Qwen2B (7B not loaded)"
         })
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/explain")
-async def explain_image(
-    file: UploadFile = File(...),
-    question: str = Form(...)
-):
-    """
-    Get detailed explanation using Qwen2-VL
-    """
-    try:
-        contents = await file.read()
-        image = Image.open(io.BytesIO(contents)).convert("RGB")
-        
-        result = qwen_service.explain_decision(image, question)
-        
-        return JSONResponse(content={
-            "success": True,
-            "filename": file.filename,
-            "explanation": result
-        })
-    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=False  # Set to True for development
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

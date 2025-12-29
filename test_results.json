@@ -1,79 +1,78 @@
 {
   "success": true,
   "filename": "test_image.jpg",
-  "pipeline_results": {
-    "step1_ocr": {
-      "text_found": true,
-      "text_count": 1,
-      "full_text": "Bikrfy",
-      "analysis": {
-        "has_promotional_text": false,
-        "has_brand_indicators": false,
-        "has_contact_info": false,
-        "has_prices": false,
-        "text_density": "low"
-      }
-    },
-    "step2_clip": {
-      "category": {
-        "scores": {
-          "product photo": 0.22795619070529938,
-          "person or people": 0.002691937144845724,
-          "landscape or nature": 0.0005274607101455331,
-          "food or beverage": 0.000530020275618881,
-          "technology or electronics": 0.01788715459406376,
-          "fashion or clothing": 0.0004161454562563449,
-          "interior design": 0.7370638251304626,
-          "vehicle or transportation": 0.0005127842887304723,
-          "art or illustration": 0.0035617370158433914,
-          "text or document": 0.008852807804942131
-        },
-        "top_category": "interior design",
-        "confidence": 0.7370638251304626
-      },
-      "risk": {
-        "scores": {
-          "safe content": 0.0973842516541481,
-          "inappropriate content": 0.10867460072040558,
-          "violent content": 0.07130957394838333,
-          "adult content": 0.12656177580356598,
-          "disturbing content": 0.24092355370521545,
-          "graphic content": 0.35514628887176514
-        },
-        "risk_level": "high",
-        "safe_content_score": 0.0973842516541481
-      },
-      "promo": {
-        "scores": {
-          "promotional banner": 0.08931566029787064,
-          "advertisement banner": 0.03677096217870712,
-          "sale banner": 0.17503474652767181,
-          "discount banner": 0.021287407726049423,
-          "marketing banner": 0.4160090982913971,
-          "regular photo without banner": 0.2615821361541748
-        },
-        "is_promotional": true,
-        "confidence": 0.7384178638458252
-      }
-    },
-    "step3_qwen2vl": {
-      "decision": "REJECT",
-      "confidence": 50,
-      "explanation": "system\nYou are a helpful assistant.\nuser\nAnalyze this image for content moderation. Provide:\n1. A clear APPROVE or REJECT decision\n2. Detailed explanation of your decision\n3. List any policy violations or concerns\n4. Confidence level (0-100)\nPreliminary analysis suggests: Category=unknown, Risk=unknown.\n\nRespond in JSON format:\n{\n    \"decision\": \"APPROVE/REJECT\",\n    \"confidence\": 85,\n    \"explanation\": \"detailed explanation here\",\n    \"violations\": [\"list of violations if any\"],\n    \"categories_detected\": [\"category1\", \"category2\"],\n    \"recommended_action\": \"action recommendation\"\n}\nassistant\n{\n    \"decision\": \"APPROVE\",\n    \"confidence\": 85,\n    \"explanation\": \"The image shows a modern office setup with a clean and organized workspace. The desks are equipped with computers, chairs, and a phone, indicating a professional environment. There are no visible policy violations or concerns. The image is of high quality and provides a clear view of the office setup.\",\n    \"violations\": [\"none\"],\n    \"categories_detected\": [\"office\", \"technology\"],\n    \"recommended_action\": \"Continue with the analysis and provide a detailed description of the office setup, including any additional details or features that may be relevant to the user's needs.\"\n}",
-      "violations": [
-        "parsing_error"
-      ],
-      "categories_detected": [],
-      "recommended_action": "manual review required"
-    }
+  "final_decision": "REJECT",
+  "reason": "system\nYou are a helpful assistant.\nuser\nAnalyze this image for content moderation. Provide:\n1. A clear APPROVE or REJECT decision\n2. Detailed explanation of your decision\n3. List any policy violations or concerns\n4. Confidence level (0-100)\nPreliminary analysis suggests: Category=unknown, Risk=unknown.\n\nRespond in JSON format:\n{\n    \"decision\": \"APPROVE/REJECT\",\n    \"confidence\": 85,\n    \"explanation\": \"detailed explanation here\",\n    \"violations\": [\"list of violations if any\"],\n    \"categories_detected\": [\"category1\", \"category2\"],\n    \"recommended_action\": \"action recommendation\"\n}\nassistant\n```json\n{\n    \"decision\": \"APPROVE\",\n    \"confidence\": 85,\n    \"explanation\": \"The image contains promotional content for a security camera package, which appears to be a legitimate advertisement. The content is clear and informative, and there are no apparent policy violations or concerns. The image is of high quality and the text is easy to read.\",\n    \"violations\": [\"none\"],\n    \"categories_detected\": [\"security camera package\"],\n    \"recommended_action\": \"No action is needed as the image is a legitimate advertisement.\"\n}\n```",
+  "confidence": 50,
+  "stopped_at": 4,
+  "pipeline_summary": {
+    "text_available": true,
+    "text_count": 22,
+    "category": "Computer » Networking » Wireless Access Point",
+    "has_promotional": true,
+    "risk_score": 0.999534010887146
   },
-  "final_summary": {
-    "text_extracted": "Bikrfy",
-    "has_promotional_content": true,
-    "category": "interior design",
-    "risk_level": "high",
-    "final_decision": "REJECT",
-    "decision_confidence": 50,
-    "explanation": "system\nYou are a helpful assistant.\nuser\nAnalyze this image for content moderation. Provide:\n1. A clear APPROVE or REJECT decision\n2. Detailed explanation of your decision\n3. List any policy violations or concerns\n4. Confidence level (0-100)\nPreliminary analysis suggests: Category=unknown, Risk=unknown.\n\nRespond in JSON format:\n{\n    \"decision\": \"APPROVE/REJECT\",\n    \"confidence\": 85,\n    \"explanation\": \"detailed explanation here\",\n    \"violations\": [\"list of violations if any\"],\n    \"categories_detected\": [\"category1\", \"category2\"],\n    \"recommended_action\": \"action recommendation\"\n}\nassistant\n{\n    \"decision\": \"APPROVE\",\n    \"confidence\": 85,\n    \"explanation\": \"The image shows a modern office setup with a clean and organized workspace. The desks are equipped with computers, chairs, and a phone, indicating a professional environment. There are no visible policy violations or concerns. The image is of high quality and provides a clear view of the office setup.\",\n    \"violations\": [\"none\"],\n    \"categories_detected\": [\"office\", \"technology\"],\n    \"recommended_action\": \"Continue with the analysis and provide a detailed description of the office setup, including any additional details or features that may be relevant to the user's needs.\"\n}"
-  }
+  "log": [
+    {
+      "step": 1,
+      "service": "Quality",
+      "passed": true,
+      "checks": {
+        "resolution": {
+          "passed": true,
+          "reason": "Resolution acceptable",
+          "details": {
+            "width": 800,
+            "height": 800
+          }
+        },
+        "aspect_ratio": {
+          "passed": true,
+          "reason": "Aspect ratio acceptable",
+          "details": {
+            "aspect_ratio": 1.0
+          }
+        },
+        "blur": {
+          "passed": true,
+          "reason": "Image sharpness acceptable",
+          "details": {
+            "blur_score": 1049.5238968170997
+          }
+        },
+        "corrupted": {
+          "passed": true,
+          "reason": "Image not corrupted",
+          "details": {}
+        },
+        "screenshot_ui": {
+          "passed": true,
+          "reason": "Not a screenshot",
+          "details": {
+            "edge_density": 0.06453125
+          }
+        }
+      }
+    },
+    {
+      "step": 2,
+      "service": "OCR",
+      "text_available": true,
+      "text_count": 22
+    },
+    {
+      "step": 3,
+      "service": "CLIP",
+      "category": "Computer » Networking » Wireless Access Point",
+      "has_promotional": true,
+      "risk_score": 0.999534010887146,
+      "risk_category": "promo"
+    },
+    {
+      "step": 4,
+      "service": "Qwen2B",
+      "decision": "REJECT",
+      "confidence": 50
+    }
+  ]
 }
