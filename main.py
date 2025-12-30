@@ -44,6 +44,7 @@ qwen7b_service: Optional[Qwen2VLService] = None
 
 class ImageURLRequest(BaseModel):
     image_url: str
+    category: Optional[str] = None  # Optional category to match
 
 
 @app.on_event("startup")
@@ -304,6 +305,21 @@ async def check_image_from_url(request: ImageURLRequest):
         category = clip_full.get("category_analysis", {})
         top_category = category.get("top_category", "Unknown")
         
+        # Check if user provided category matches
+        user_category = request.category
+        category_match = "no"
+        if user_category:
+            # Normalize and compare
+            user_cat_normalized = user_category.lower().strip()
+            detected_cat_normalized = top_category.lower().strip()
+            
+            # Check exact match or partial match
+            if user_cat_normalized == detected_cat_normalized or user_cat_normalized in detected_cat_normalized:
+                category_match = "yes"
+            else:
+                # Check if any part matches (e.g., "Laptop" matches "Computer » PC & Laptop » Laptop")
+                category_match = "yes" if user_cat_normalized in detected_cat_normalized else "no"
+        
         # Check promotional content
         promo = clip_full.get("promo_analysis", {})
         has_promotional = promo.get("is_promotional", False)
@@ -347,6 +363,7 @@ async def check_image_from_url(request: ImageURLRequest):
             "stock_photo": is_stock_photo,
             "illegal_photo": is_illegal,
             "category": top_category,
+            "category_match": category_match if user_category else "not_provided",
             "watermark_check": "yes" if has_watermark else "no"
         }
         

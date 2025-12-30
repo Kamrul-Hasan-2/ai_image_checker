@@ -103,26 +103,49 @@ Respond in JSON format:
         
         # Parse response
         try:
-            # Extract JSON from response
-            json_start = response.find('{')
-            json_end = response.rfind('}') + 1
+            # Extract assistant's response from the full conversation
+            # The response includes: system\n...\nuser\n...\nassistant\n...
+            assistant_marker = "assistant\n"
+            if assistant_marker in response:
+                assistant_response = response.split(assistant_marker)[-1].strip()
+            else:
+                assistant_response = response
+            
+            # Remove markdown code blocks if present (```json ... ```)
+            if "```json" in assistant_response:
+                json_start = assistant_response.find("```json") + 7
+                json_end = assistant_response.find("```", json_start)
+                if json_end > json_start:
+                    assistant_response = assistant_response[json_start:json_end].strip()
+            elif "```" in assistant_response:
+                # Handle generic code blocks
+                json_start = assistant_response.find("```") + 3
+                json_end = assistant_response.find("```", json_start)
+                if json_end > json_start:
+                    assistant_response = assistant_response[json_start:json_end].strip()
+            
+            # Now extract JSON from the cleaned response
+            json_start = assistant_response.find('{')
+            json_end = assistant_response.rfind('}') + 1
+            
             if json_start != -1 and json_end > json_start:
-                result = json.loads(response[json_start:json_end])
+                json_str = assistant_response[json_start:json_end]
+                result = json.loads(json_str)
             else:
                 # Fallback if JSON parsing fails
                 result = {
-                    "decision": "REJECT" if "reject" in response.lower() else "APPROVE",
+                    "decision": "REJECT" if "reject" in assistant_response.lower() else "APPROVE",
                     "confidence": 50,
-                    "explanation": response,
+                    "explanation": assistant_response,
                     "violations": [],
                     "categories_detected": [],
                     "recommended_action": "manual review recommended"
                 }
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
             result = {
                 "decision": "REJECT",
                 "confidence": 50,
-                "explanation": response,
+                "explanation": f"JSON parsing error: {str(e)}. Response: {response[:200]}",
                 "violations": ["parsing_error"],
                 "categories_detected": [],
                 "recommended_action": "manual review required"
