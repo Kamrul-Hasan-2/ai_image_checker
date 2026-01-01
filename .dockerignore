@@ -14,6 +14,7 @@ build
 .vscode
 .idea
 *.md
+!render.yaml
 test_*.py
 test_results.json
 *.log
@@ -21,3 +22,4 @@ test_results.json
 venv/
 env/
 ENV/
+Dockerfile.minimal

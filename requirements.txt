@@ -2,8 +2,6 @@ fastapi
 uvicorn[standard]
 python-multipart
 transformers
-torch
-torchvision
 Pillow
 qwen-vl-utils
 accelerate
