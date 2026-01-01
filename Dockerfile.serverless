@@ -1,0 +1,37 @@
+# RunPod Serverless Dockerfile for AI Image Checker
+FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libglib2.0-0 \
+    libgomp1 \
+    libgl1 \
+    libsm6 \
+    libxext6 \
+    libxrender1 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY requirements_serverless.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements_serverless.txt
+
+# Copy application code
+COPY quality_service.py .
+COPY ocr_service.py .
+COPY clip_service.py .
+COPY qwen_service.py .
+COPY handler.py .
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    TRANSFORMERS_CACHE=/runpod-volume/huggingface \
+    TORCH_HOME=/runpod-volume/torch
+
+# RunPod will automatically call the handler
+CMD ["python", "-u", "handler.py"]

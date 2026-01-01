@@ -1,0 +1,13 @@
+runpod
+fastapi
+python-multipart
+transformers
+Pillow
+qwen-vl-utils
+accelerate
+sentencepiece
+easyocr
+opencv-python-headless
+requests
+torch
+torchvision
