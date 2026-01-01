@@ -6,29 +6,19 @@ WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
     libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
     libgomp1 \
-    wget \
     curl \
-    git \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-
-# Upgrade pip and install build tools
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Copy requirements first for better caching
 COPY requirements.txt .
 
 # Install Python dependencies in stages to handle memory better
-RUN pip install --no-cache-dir fastapi uvicorn[standard] python-multipart requests && \
+RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir transformers accelerate sentencepiece && \
-    pip install --no-cache-dir Pillow opencv-python-headless easyocr && \
-    pip install --no-cache-dir qwen-vl-utils
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
