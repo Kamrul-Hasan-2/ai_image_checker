@@ -4,8 +4,15 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
+# Set environment variables early
+ENV PYTHONUNBUFFERED=1 \
+    TRANSFORMERS_CACHE=/root/.cache/huggingface \
+    TORCH_HOME=/root/.cache/torch \
+    DEBIAN_FRONTEND=noninteractive
+
 # Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libgomp1 \
     libgl1 \
@@ -13,33 +20,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libxrender1 \
     curl \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Copy requirements first for better caching
+# Copy requirements
 COPY requirements.txt .
 
-# Install Python dependencies in stages to handle memory better
-RUN pip install --no-cache-dir --upgrade pip && \
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
 
-# Create directory for model cache
-RUN mkdir -p /root/.cache/huggingface
+# Create cache directories
+RUN mkdir -p /root/.cache/huggingface /root/.cache/torch
 
 # Expose port
 EXPOSE 8000
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV TRANSFORMERS_CACHE=/root/.cache/huggingface
-ENV TORCH_HOME=/root/.cache/torch
-
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Run the application
