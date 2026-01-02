@@ -1,5 +1,5 @@
 # RunPod Serverless - Using PyTorch base image to avoid download issues
-FROM pytorch/pytorch:2.0.1-py3.11-cpu
+FROM pytorch/pytorch:2.1.0-py3.11-cpu
 
 WORKDIR /app
 
