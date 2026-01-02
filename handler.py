@@ -259,19 +259,7 @@ def run_pipeline(job: Dict[str, Any]) -> Dict[str, Any]:
         ocr_result = check_with_ocr(image, category)
         results["steps"].append(ocr_result)
         
-        if ocr_result["passed"]:
-            results["final_decision"] = True
-            results["final_confidence"] = ocr_result["confidence"]
-            results["matched_at"] = "ocr"
-            return results
-        
-        if pipeline_mode == "fast":
-            results["final_decision"] = False
-            results["final_confidence"] = ocr_result["confidence"]
-            results["reason"] = "Failed OCR check (fast mode)"
-            return results
-        
-        # Step 3: CLIP Check
+        # Step 3: CLIP Check (always run to get risk level)
         print("🎨 Step 3: CLIP Check")
         clip_result = check_with_clip(image, category)
         results["steps"].append(clip_result)
