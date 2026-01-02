@@ -130,7 +130,8 @@ def check_with_ocr(image: Image.Image, category: str) -> Dict[str, Any]:
         return {
             "step": "ocr_check",
             "error": str(e),
-            "passed": False
+            "passed": False,
+            "confidence": 0.0
         }
 
 
@@ -148,7 +149,8 @@ def check_with_clip(image: Image.Image, category: str) -> Dict[str, Any]:
         return {
             "step": "clip_check",
             "error": str(e),
-            "passed": False
+            "passed": False,
+            "confidence": 0.0
         }
 
 
@@ -167,7 +169,8 @@ def check_with_qwen(image: Image.Image, category: str, image_url: Optional[str] 
         return {
             "step": "qwen_check",
             "error": str(e),
-            "passed": False
+            "passed": False,
+            "confidence": 0.0
         }
 
 
