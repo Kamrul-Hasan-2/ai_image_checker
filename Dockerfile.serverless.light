@@ -1,0 +1,32 @@
+# RunPod Serverless - Using PyTorch base image to avoid download issues
+FROM pytorch/pytorch:2.0.1-py3.11-cpu
+
+WORKDIR /app
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    TRANSFORMERS_CACHE=/runpod-volume/huggingface \
+    TORCH_HOME=/runpod-volume/torch \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DEFAULT_TIMEOUT=300
+
+# Install minimal system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install Python dependencies (excluding torch/torchvision)
+COPY requirements_serverless.txt .
+RUN pip install --upgrade pip && \
+    grep -v "^torch" requirements_serverless.txt | grep -v "^torchvision" | pip install -r /dev/stdin
+
+# Copy application code
+COPY quality_service.py ocr_service.py clip_service.py qwen_service.py handler.py ./
+
+# RunPod serverless handler entry point
+CMD ["python", "-u", "-m", "runpod"]

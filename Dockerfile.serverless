@@ -6,39 +6,38 @@ WORKDIR /app
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     TRANSFORMERS_CACHE=/runpod-volume/huggingface \
-    TORCH_HOME=/runpod-volume/torch
+    TORCH_HOME=/runpod-volume/torch \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies
+# Install minimal system dependencies only (avoid libgl1 and mesa libraries)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libgomp1 \
-    libgl1 \
     libsm6 \
     libxext6 \
     libxrender1 \
-    curl && \
-    rm -rf /var/lib/apt/lists/*
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Copy requirements
 COPY requirements_serverless.txt .
 
-# Install PyTorch CPU version first
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -r requirements_serverless.txt
+# Upgrade pip and increase timeout
+RUN pip install --upgrade pip
+
+# Install PyTorch CPU version with increased timeout and retries
+RUN pip install --default-timeout=900 --retries=10 \
+    torch torchvision --index-url https://download.pytorch.org/whl/cpu || \
+    pip install --default-timeout=900 --retries=10 torch torchvision
+
+# Install other dependencies
+RUN pip install --default-timeout=300 -r requirements_serverless.txt
 
 # Copy application code
-COPY quality_service.py .
-COPY ocr_service.py .
-COPY clip_service.py .
-COPY qwen_service.py .
-COPY handler.py .
+COPY quality_service.py ocr_service.py clip_service.py qwen_service.py handler.py ./
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1 \
-    TRANSFORMERS_CACHE=/runpod-volume/huggingface \
-    TORCH_HOME=/runpod-volume/torch
-
-# RunPod will automatically call the handler
-CMD ["python", "-u", "handler.py"]
+# RunPod serverless handler entry point
+CMD ["python", "-u", "-m", "runpod"]

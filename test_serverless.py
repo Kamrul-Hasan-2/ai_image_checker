@@ -8,7 +8,7 @@ import time
 
 # RunPod configuration
 ENDPOINT_ID = "w4nz9f65kklau1"  # Your endpoint ID
-API_KEY = "YOUR_API_KEY"  # Replace with your RunPod API key
+API_KEY = "rpa_J8BNLTEF77UW3LNXY8VR7T054IGL2T0N98LVKA65z8h29z"
 ENDPOINT_URL = f"https://api.runpod.ai/v2/{ENDPOINT_ID}/run"
 
 headers = {
