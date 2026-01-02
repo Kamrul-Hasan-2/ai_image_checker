@@ -1,5 +1,5 @@
-# RunPod Serverless - Using PyTorch base image to avoid download issues
-FROM pytorch/pytorch:2.1.0-py3.11-cpu
+# RunPod Serverless - Lightweight build
+FROM python:3.11-slim
 
 WORKDIR /app
 
@@ -20,10 +20,11 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python dependencies (excluding torch/torchvision)
+# Copy and install Python dependencies
 COPY requirements_serverless.txt .
 RUN pip install --upgrade pip && \
-    grep -v "^torch" requirements_serverless.txt | grep -v "^torchvision" | pip install -r /dev/stdin
+    pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cpu && \
+    pip install -r requirements_serverless.txt
 
 # Copy application code
 COPY quality_service.py ocr_service.py clip_service.py qwen_service.py handler.py ./
