@@ -99,18 +99,19 @@ def load_image(image_input: str) -> Image.Image:
 def check_image_quality(image: Image.Image) -> Dict[str, Any]:
     """Step 1: Quality check"""
     try:
-        result = quality_service.check_quality(image)
+        result = quality_service.check_image(image)
         return {
             "step": "quality_check",
-            "passed": result["is_good_quality"],
-            "confidence": result.get("overall_score", 0.0),
+            "passed": result["passed"],
+            "confidence": 1.0 if result["passed"] else 0.0,
             "details": result
         }
     except Exception as e:
         return {
             "step": "quality_check",
             "error": str(e),
-            "passed": False
+            "passed": False,
+            "confidence": 0.0
         }
 
 
