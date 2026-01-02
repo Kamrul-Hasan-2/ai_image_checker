@@ -10,11 +10,37 @@ import requests
 from PIL import Image
 from typing import Dict, Any, Optional
 import traceback
+import sys
 
-from quality_service import QualityCheckService
-from ocr_service import OCRService
-from clip_service import CLIPService
-from qwen_service import Qwen2VLService
+print("Starting handler import...", flush=True)
+
+try:
+    from quality_service import QualityCheckService
+    print("✓ QualityCheckService imported", flush=True)
+except Exception as e:
+    print(f"✗ Failed to import QualityCheckService: {e}", flush=True)
+    traceback.print_exc()
+    
+try:
+    from ocr_service import OCRService
+    print("✓ OCRService imported", flush=True)
+except Exception as e:
+    print(f"✗ Failed to import OCRService: {e}", flush=True)
+    traceback.print_exc()
+    
+try:
+    from clip_service import CLIPService
+    print("✓ CLIPService imported", flush=True)
+except Exception as e:
+    print(f"✗ Failed to import CLIPService: {e}", flush=True)
+    traceback.print_exc()
+    
+try:
+    from qwen_service import Qwen2VLService
+    print("✓ Qwen2VLService imported", flush=True)
+except Exception as e:
+    print(f"✗ Failed to import Qwen2VLService: {e}", flush=True)
+    traceback.print_exc()
 
 
 # Global services - initialized once per worker
