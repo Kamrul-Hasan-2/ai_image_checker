@@ -28,4 +28,4 @@ RUN pip install --upgrade pip && \
 COPY quality_service.py ocr_service.py clip_service.py qwen_service.py handler.py ./
 
 # RunPod serverless handler entry point
-CMD ["sh", "-c", "echo '=== Starting container ===' && ls -la && echo '=== Files listed ===' && python -u -m runpod"]
+CMD ["python", "-u", "handler.py"]
