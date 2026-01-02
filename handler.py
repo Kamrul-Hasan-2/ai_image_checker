@@ -100,11 +100,19 @@ def check_image_quality(image: Image.Image) -> Dict[str, Any]:
     """Step 1: Quality check"""
     try:
         result = quality_service.check_image(image)
+        checks = result.get("checks", {})
+        
         return {
             "step": "quality_check",
             "passed": result["passed"],
             "confidence": 1.0 if result["passed"] else 0.0,
-            "details": result
+            "details": {
+                "blur_detection": "no" if checks.get("blur", {}).get("passed") else "yes",
+                "blur_score": checks.get("blur", {}).get("details", {}).get("blur_score", 0),
+                "screenshot_check": "no" if checks.get("screenshot_ui", {}).get("passed") else "yes",
+                "corruption_check": "no" if checks.get("corrupted", {}).get("passed") else "yes",
+                "resolution": f"{image.width}x{image.height}"
+            }
         }
     except Exception as e:
         return {
@@ -119,49 +127,61 @@ def check_with_ocr(image: Image.Image, category: str) -> Dict[str, Any]:
     """Step 2: OCR check"""
     try:
         result = ocr_service.extract_text(image)
-        detected_text = result.get("full_text", "")
-        has_text = len(detected_text) > 0
+        full_text = result.get("full_text", "")
         
         return {
             "step": "ocr_check",
-            "passed": has_text,
+            "passed": len(full_text) > 0,
             "confidence": result.get("average_confidence", 0.5),
-            "detected_text": result.get("extracted_data", []),
-            "details": result
+            "image_extract": full_text[:200] if full_text else "No text detected"
         }
     except Exception as e:
         return {
             "step": "ocr_check",
             "error": str(e),
             "passed": False,
-            "confidence": 0.0
+            "confidence": 0.0,
+            "image_extract": ""
         }
 
 
 def check_with_clip(image: Image.Image, category: str) -> Dict[str, Any]:
     """Step 3: CLIP check"""
     try:
-        # Use analyze_image which combines category and risk analysis
         result = clip_service.analyze_image(image)
-        risk_level = result.get("risk_analysis", {}).get("risk_level", 0)
+        risk_analysis = result.get("risk_analysis", {})
+        category_match = result.get("category_match", {})
         
         return {
             "step": "clip_check",
-            "passed": risk_level < 50,  # Pass if low risk
-            "confidence": result.get("category_match", {}).get("score", 0.0),
-            "details": result
+            "passed": risk_analysis.get("risk_level", 0) < 85,
+            "confidence": category_match.get("score", 0.0),
+            "details": {
+                "has_brand_indicators": "yes" if risk_analysis.get("has_brand_indicators") else "no",
+                "has_phone_number": "yes" if risk_analysis.get("has_phone_number") else "no",
+                "has_prices": "yes" if risk_analysis.get("has_prices") else "no",
+                "has_promotional_text": "yes" if risk_analysis.get("has_promotional_text") else "no",
+                "has_website_link": "yes" if risk_analysis.get("has_website_link") else "no",
+                "is_promotional": "yes" if risk_analysis.get("is_promotional") else "no",
+                "stock_photo": "no",  # Add stock photo detection if available
+                "illegal_photo": "no",  # Add illegal content detection if available
+                "category": category_match.get("category", category),
+                "category_match": "yes" if category_match.get("score", 0) > 0.5 else "no",
+                "risk_level": risk_analysis.get("risk_level", 0)
+            }
         }
     except Exception as e:
         return {
             "step": "clip_check",
             "error": str(e),
             "passed": False,
-            "confidence": 0.0
+            "confidence": 0.0,
+            "details": {"risk_level": 0}
         }
 
 
 def check_with_qwen(image: Image.Image, category: str, image_url: Optional[str] = None) -> Dict[str, Any]:
-    """Step 4: Qwen2-VL check"""
+    """Step 4: Qwen2-VL check (only if risk >= 85)"""
     try:
         result = qwen2b_service.moderate_image(image)
         decision = result.get("decision", "BLOCK").upper()
@@ -171,7 +191,7 @@ def check_with_qwen(image: Image.Image, category: str, image_url: Optional[str] 
             "passed": decision == "APPROVE",
             "confidence": result.get("confidence", 0.0),
             "reasoning": result.get("reasoning", ""),
-            "details": result
+            "decision": decision
         }
     except Exception as e:
         return {
@@ -256,22 +276,26 @@ def run_pipeline(job: Dict[str, Any]) -> Dict[str, Any]:
         clip_result = check_with_clip(image, category)
         results["steps"].append(clip_result)
         
-        if clip_result["passed"]:
-            results["final_decision"] = True
+        risk_level = clip_result.get("details", {}).get("risk_level", 0)
+        results["risk_level"] = risk_level
+        
+        # Only call Qwen2-VL if risk level >= 85
+        if risk_level >= 85:
+            print("🤖 Step 4: Qwen2-VL Check (High Risk)")
+            image_url = image_input if image_input.startswith('http') else None
+            qwen_result = check_with_qwen(image, category, image_url)
+            results["steps"].append(qwen_result)
+            
+            results["final_decision"] = qwen_result["passed"]
+            results["final_confidence"] = qwen_result["confidence"]
+            results["matched_at"] = "qwen"
+            results["reasoning"] = qwen_result.get("reasoning", "")
+        else:
+            # Low risk - auto approve based on CLIP
+            results["final_decision"] = clip_result["passed"]
             results["final_confidence"] = clip_result["confidence"]
             results["matched_at"] = "clip"
-            return results
-        
-        # Step 4: Qwen2-VL Check
-        print("🤖 Step 4: Qwen2-VL Check")
-        image_url = image_input if image_input.startswith('http') else None
-        qwen_result = check_with_qwen(image, category, image_url)
-        results["steps"].append(qwen_result)
-        
-        results["final_decision"] = qwen_result["passed"]
-        results["final_confidence"] = qwen_result["confidence"]
-        results["matched_at"] = "qwen" if qwen_result["passed"] else "none"
-        results["reasoning"] = qwen_result.get("reasoning", "")
+            results["reasoning"] = f"Risk level {risk_level} is below threshold (85), auto-approved"
         
         return results
         
