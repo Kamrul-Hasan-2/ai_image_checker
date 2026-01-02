@@ -118,12 +118,15 @@ def check_image_quality(image: Image.Image) -> Dict[str, Any]:
 def check_with_ocr(image: Image.Image, category: str) -> Dict[str, Any]:
     """Step 2: OCR check"""
     try:
-        result = ocr_service.check_category(image, category)
+        result = ocr_service.extract_text(image)
+        detected_text = result.get("full_text", "")
+        has_text = len(detected_text) > 0
+        
         return {
             "step": "ocr_check",
-            "passed": result["match"],
-            "confidence": result.get("confidence", 0.0),
-            "detected_text": result.get("detected_text", []),
+            "passed": has_text,
+            "confidence": result.get("average_confidence", 0.5),
+            "detected_text": result.get("extracted_data", []),
             "details": result
         }
     except Exception as e:
@@ -138,11 +141,14 @@ def check_with_ocr(image: Image.Image, category: str) -> Dict[str, Any]:
 def check_with_clip(image: Image.Image, category: str) -> Dict[str, Any]:
     """Step 3: CLIP check"""
     try:
-        result = clip_service.check_category(image, category)
+        # Use analyze_image which combines category and risk analysis
+        result = clip_service.analyze_image(image)
+        risk_level = result.get("risk_analysis", {}).get("risk_level", 0)
+        
         return {
             "step": "clip_check",
-            "passed": result["match"],
-            "confidence": result.get("similarity", 0.0),
+            "passed": risk_level < 50,  # Pass if low risk
+            "confidence": result.get("category_match", {}).get("score", 0.0),
             "details": result
         }
     except Exception as e:
@@ -157,10 +163,12 @@ def check_with_clip(image: Image.Image, category: str) -> Dict[str, Any]:
 def check_with_qwen(image: Image.Image, category: str, image_url: Optional[str] = None) -> Dict[str, Any]:
     """Step 4: Qwen2-VL check"""
     try:
-        result = qwen2b_service.check_category(image, category, image_url)
+        result = qwen2b_service.moderate_image(image)
+        decision = result.get("decision", "BLOCK").upper()
+        
         return {
             "step": "qwen_check",
-            "passed": result["match"],
+            "passed": decision == "APPROVE",
             "confidence": result.get("confidence", 0.0),
             "reasoning": result.get("reasoning", ""),
             "details": result
