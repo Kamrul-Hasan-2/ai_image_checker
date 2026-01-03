@@ -612,24 +612,41 @@ class CLIPService:
             ]
 
         # Illegal products list
+        # Bangladesh-specific illegal products (highly specific descriptions)
         self.illegal_products = [
-            "gun", "firearm", "pistol", "rifle", "shotgun", "automatic weapon",
-            "bullet", "ammunition", "magazine", "silencer", "bomb", "grenade",
-            "landmine", "explosive", "dynamite", "gunpowder", "TNT",
-            "sword", "dagger", "switchblade", "illegal knife", "knuckle duster",
-            "taser", "stun gun", "pepper spray",
-            "heroin", "cocaine", "yaba", "methamphetamine", "marijuana",
-            "LSD", "MDMA", "opium", "drug-making chemicals",
-            "poison", "cyanide", "arsenic", "toxic chemicals", "chemical weapons",
-            "radioactive materials",
-            "fake currency", "counterfeit money", "forged documents",
-            "fake passport", "fake NID",
-            "hacking tools", "malware", "ransomware", "spyware",
-            "stolen data", "carding tools",
-            "child abuse material", "human trafficking items",
-            "ivory", "tiger skin", "rhino horn", "illegal wildlife products",
-            "pornographic content", "gambling equipment", "illegal lottery tickets",
-            "unlicensed alcohol", "illegal tobacco", "e-cigarettes", "vape"
+            # Firearms - very specific
+            "handgun pistol with bullets", "rifle firearm with ammunition", "shotgun weapon", 
+            "automatic assault rifle", "revolver pistol", "gun barrel and trigger",
+            
+            # Ammunition & explosives
+            "bullet cartridges ammunition", "bomb explosive device", "hand grenade", 
+            "landmine explosive", "TNT dynamite", "gunpowder explosive powder",
+            
+            # Sharp weapons
+            "sword blade weapon", "dagger knife blade", "switchblade knife", 
+            "machete blade", "combat knife weapon",
+            
+            # Drugs - Bangladesh specific
+            "heroin powder drug", "cocaine white powder", "yaba pink pills tablets", 
+            "methamphetamine crystal meth", "marijuana cannabis plant", 
+            "drug syringes needles", "opium poppy plant",
+            
+            # Poison & chemicals
+            "poison toxic liquid bottle", "cyanide chemical powder", 
+            "toxic chemical hazard", "acid corrosive liquid",
+            
+            # Counterfeit documents
+            "fake passport document", "counterfeit money bills", 
+            "forged identity card NID", "fake certificate diploma",
+            
+            # Wildlife & illegal items
+            "ivory tusk elephant", "tiger skin fur", "illegal wildlife animal parts",
+            
+            # Adult content
+            "pornographic explicit sexual image", "nude explicit content",
+            
+            # Other illegal
+            "stolen credit cards", "hacking device equipment"
         ]
         
         # Define risk categories (NEW REQUIREMENTS)
@@ -657,7 +674,7 @@ class CLIPService:
         ]
     
     def check_illegal_content(self, image: Image.Image) -> Dict:
-        """Check if image contains illegal products"""
+        """Check if image contains illegal products with enhanced accuracy"""
         inputs = self.processor(
             text=self.illegal_products,
             images=image,
@@ -670,18 +687,30 @@ class CLIPService:
             logits_per_image = outputs.logits_per_image
             probs = logits_per_image.softmax(dim=1)[0]
         
-        # Get max illegal product score
-        max_score = probs.max().item()
-        max_idx = probs.argmax().item()
+        # Get top 3 scores for better accuracy
+        top3_values, top3_indices = torch.topk(probs, k=min(3, len(probs)))
+        max_score = top3_values[0].item()
+        max_idx = top3_indices[0].item()
         illegal_product = self.illegal_products[max_idx]
         
-        # More strict threshold - only flag clearly illegal items (reduce false positives)
-        is_illegal = max_score > 0.65
+        # Calculate confidence: check if top score is significantly higher than others
+        confidence_gap = max_score - top3_values[1].item() if len(top3_values) > 1 else max_score
+        is_confident = confidence_gap > 0.15  # Significant gap between top scores
+        
+        # Adaptive threshold based on confidence
+        # High threshold = fewer false positives
+        if is_confident and max_score > 0.70:
+            is_illegal = True
+        elif max_score > 0.75:  # Very high score even without confidence gap
+            is_illegal = True
+        else:
+            is_illegal = False
         
         return {
             "is_illegal": is_illegal,
             "illegal_product": illegal_product if is_illegal else None,
             "confidence": max_score,
+            "confidence_gap": confidence_gap,
             "all_scores": {prod: probs[i].item() for i, prod in enumerate(self.illegal_products) if probs[i].item() > 0.50}
         }
     
