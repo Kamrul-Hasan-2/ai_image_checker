@@ -202,37 +202,17 @@ def check_with_qwen(image: Image.Image, category: str, image_url: Optional[str] 
         }
 
 
-def run_pipeline(job: Dict[str, Any]) -> Dict[str, Any]:
+def process_single_image(image_input: str, category: str, pipeline_mode: str) -> Dict[str, Any]:
     """
-    Main pipeline handler
-    
-    Input format:
-    {
-        "input": {
-            "image": "url or base64",
-            "category": "product category to match",
-            "pipeline": "full" (default) or "fast" or "quality_only"
-        }
-    }
+    Process a single image through the pipeline
     """
     try:
-        # Initialize services if needed
-        initialize_services()
-        
-        # Extract input
-        job_input = job.get("input", {})
-        image_input = job_input.get("image")
-        category = job_input.get("category", "unknown")
-        pipeline_mode = job_input.get("pipeline", "full")
-        
-        if not image_input:
-            return {"error": "No image provided. Please provide 'image' field with URL or base64 data."}
-        
         # Load image
         print(f"📸 Loading image for category: {category}")
         image = load_image(image_input)
         
         results = {
+            "image": image_input[:100] + "..." if len(image_input) > 100 else image_input,
             "category": category,
             "pipeline_mode": pipeline_mode,
             "steps": []
@@ -286,6 +266,114 @@ def run_pipeline(job: Dict[str, Any]) -> Dict[str, Any]:
             results["reasoning"] = f"Risk level {risk_level} is below threshold (85), auto-approved"
         
         return results
+        
+    except Exception as e:
+        print(f"❌ Error processing image: {str(e)}")
+        return {
+            "image": image_input[:100] + "..." if len(image_input) > 100 else image_input,
+            "category": category,
+            "error": str(e),
+            "final_decision": False,
+            "final_confidence": 0.0
+        }
+
+
+def run_pipeline(job: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Main pipeline handler - supports single or multiple images
+    
+    Input format (single image):
+    {
+        "input": {
+            "image": "url or base64",
+            "category": "product category to match",
+            "pipeline": "full" (default) or "fast" or "quality_only"
+        }
+    }
+    
+    Input format (multiple images):
+    {
+        "input": {
+            "images": [
+                {"image": "url1", "category": "laptop"},
+                {"image": "url2", "category": "phone"}
+            ],
+            "pipeline": "full" (default) or "fast" or "quality_only"
+        }
+    }
+    """
+    try:
+        # Initialize services if needed
+        initialize_services()
+        
+        # Extract input
+        job_input = job.get("input", {})
+        pipeline_mode = job_input.get("pipeline", "full")
+        
+        # Check if multiple images
+        if "images" in job_input:
+            # Multiple images mode
+            images_list = job_input.get("images", [])
+            
+            if not images_list:
+                return {"error": "No images provided. Please provide 'images' array."}
+            
+            print(f"\n🔄 Processing {len(images_list)} images...")
+            
+            results = {
+                "mode": "batch",
+                "total_images": len(images_list),
+                "pipeline_mode": pipeline_mode,
+                "results": []
+            }
+            
+            # Process each image
+            for idx, img_data in enumerate(images_list, 1):
+                print(f"\n{'='*60}")
+                print(f"Processing Image {idx}/{len(images_list)}")
+                print(f"{'='*60}")
+                
+                image_input = img_data.get("image")
+                category = img_data.get("category", "unknown")
+                
+                if not image_input:
+                    results["results"].append({
+                        "image_index": idx,
+                        "error": "No image URL provided",
+                        "final_decision": False
+                    })
+                    continue
+                
+                # Process single image
+                result = process_single_image(image_input, category, pipeline_mode)
+                result["image_index"] = idx
+                results["results"].append(result)
+            
+            # Summary
+            approved = sum(1 for r in results["results"] if r.get("final_decision", False))
+            rejected = len(results["results"]) - approved
+            
+            results["summary"] = {
+                "approved": approved,
+                "rejected": rejected,
+                "success_rate": f"{(approved/len(results['results'])*100):.1f}%" if results["results"] else "0%"
+            }
+            
+            return results
+        
+        else:
+            # Single image mode (backward compatible)
+            image_input = job_input.get("image")
+            category = job_input.get("category", "unknown")
+            
+            if not image_input:
+                return {"error": "No image provided. Please provide 'image' field with URL or base64 data."}
+            
+            print(f"\n📸 Processing single image...")
+            result = process_single_image(image_input, category, pipeline_mode)
+            result["mode"] = "single"
+            
+            return result
         
     except Exception as e:
         print(f"❌ Error in pipeline: {str(e)}")
