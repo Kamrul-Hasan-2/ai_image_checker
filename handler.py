@@ -335,12 +335,7 @@ def run_pipeline(job: Dict[str, Any]) -> Dict[str, Any]:
             
             print(f"\n🔄 Processing {len(images_list)} images...")
             
-            results = {
-                "mode": "batch",
-                "total_images": len(images_list),
-                "pipeline_mode": pipeline_mode,
-                "results": []
-            }
+            results = []
             
             # Process each image
             for idx, img_data in enumerate(images_list, 1):
@@ -352,8 +347,7 @@ def run_pipeline(job: Dict[str, Any]) -> Dict[str, Any]:
                 category = img_data.get("category", "unknown")
                 
                 if not image_input:
-                    results["results"].append({
-                        "image_index": idx,
+                    results.append({
                         "error": "No image URL provided",
                         "blur_image": 0,
                         "screen_short": 0,
@@ -368,14 +362,7 @@ def run_pipeline(job: Dict[str, Any]) -> Dict[str, Any]:
                 
                 # Process single image
                 result = process_single_image(image_input, category, pipeline_mode)
-                result["image_index"] = idx
-                results["results"].append(result)
-            
-            # Summary
-            results["summary"] = {
-                "total": len(results["results"]),
-                "processed": sum(1 for r in results["results"] if "error" not in r or r.get("risk_level", 0) >= 0)
-            }
+                results.append(result)
             
             return results
         
@@ -389,8 +376,6 @@ def run_pipeline(job: Dict[str, Any]) -> Dict[str, Any]:
             
             print(f"\n📸 Processing single image...")
             result = process_single_image(image_input, category, pipeline_mode)
-            result["mode"] = "single"
-            
             return result
         
     except Exception as e:
