@@ -65,32 +65,40 @@ class OCRService:
         full_text = " ".join(text_list)
         full_text_lower = full_text.lower()
         
-        # Expanded promotional keywords (aggressive detection)
+        # Expanded promotional keywords (focus on actual promotional content)
         promo_keywords = [
-            # Direct sales language
-            'sale', 'discount', 'off', '%', 'percent', 'offer', 'deal', 'promo', 'promotion',
-            'buy now', 'order now', 'call now', 'shop now', 'get now', 'book now',
-            'limited time', 'hurry', 'urgent', 'today only', 'last chance', 'don\'t miss',
-            # Pricing/deals
-            'free shipping', 'free delivery', 'cash on delivery', 'cod', 'emi', 'installment',
-            'lowest price', 'best price', 'best deal', 'hot deal', 'mega sale', 'flash sale',
-            'special offer', 'clearance', 'bargain', 'cheap', 'affordable',
+            # Discount & pricing - STRONG indicators
+            'discount', 'off', 'sale', 'offer', 'deal', 'promo', 'warranty', 'guarantee',
             # Call to action
-            'contact us', 'call us', 'whatsapp', 'inbox', 'message us', 'dm us',
-            'visit us', 'store location', 'delivery available', 'home delivery',
-            # Bengali promotional text
-            'অফার', 'ডিসকাউন‌্ট', 'সেল', 'কিনুন', 'অর্ডার',
-            # Urgency/scarcity
-            'stock limited', 'few left', 'running out', 'while supplies last',
-            'pre-order', 'reserve now', 'first come',
-            # Quality claims
-            'original', 'authentic', 'genuine', '100% original', 'warranty',
-            'money back', 'guaranteed', 'certified'
+            'buy now', 'order now', 'call now', 'shop now', 'book now', 'contact us',
+            'whatsapp', 'inbox', 'dm', 'visit us',
+            # Time-sensitive
+            'limited time', 'hurry', 'flash sale', 'today only', 'last chance',
+            # Delivery terms
+            'cash on delivery', 'cod', 'free delivery', 'home delivery', 'free shipping',
+            # Payment
+            'emi', 'installment',
+            # Marketplace watermarks (VERY strong indicator)
+            'bikroy', 'daraz', 'olx',
+            # Bengali
+            'অফার', 'ডিসকাউন‌্ট', 'সেল', 'কিনুন', 'অর্ডার'
         ]
         
-        # Count promotional keywords
+        # Brand names are NOT promotional (exclude these)
+        brand_names = [
+            'apple', 'samsung', 'sony', 'lg', 'dell', 'hp', 'asus', 'lenovo',
+            'xiaomi', 'huawei', 'oppo', 'vivo', 'realme', 'oneplus', 'nokia',
+            'canon', 'nikon', 'panasonic', 'philips', 'bosch', 'microsoft',
+            'intel', 'amd', 'nvidia', 'logitech', 'razer', 'corsair'
+        ]
+        
+        # Count promotional keywords (excluding brand names)
         promo_count = sum(1 for keyword in promo_keywords if keyword in full_text_lower)
-        promo_detected = promo_count > 0
+        
+        # Check if text is just a brand name (not promotional)
+        is_just_brand = any(brand in full_text_lower for brand in brand_names) and promo_count == 0
+        
+        promo_detected = promo_count > 0 and not is_just_brand
         
         # Enhanced regex patterns
         import re
@@ -104,14 +112,14 @@ class OCRService:
         ]
         has_phone = any(re.search(pattern, full_text) for pattern in phone_patterns)
         
-        # Website links and domains
+        # Website links and domains (marketplace watermarks are VERY promotional)
         website_patterns = [
+            r'bikroy\.com|daraz\.com\.bd|olx\.com',  # Marketplace watermarks
             r'(?:www\.|https?://)',
-            r'\w+\.(?:com|bd|net|org|in|shop|store|online)',
-            r'facebook\.com',
-            r'daraz|bikroy|ajkerdeal|pickaboo|ryans|startech'
+            r'\w+\.(?:com|bd|net|org|shop|store|online)'
         ]
         has_website_link = any(re.search(pattern, full_text_lower) for pattern in website_patterns)
+        has_marketplace_watermark = bool(re.search(r'bikroy|daraz|olx', full_text_lower))
         
         # Social media handles
         social_pattern = r'@\w+|#\w+'
@@ -146,25 +154,26 @@ class OCRService:
         
         # Calculate promotional score (0-100)
         promo_score = 0
+        
+        # Marketplace watermark is VERY strong indicator
+        if has_marketplace_watermark:
+            promo_score += 50
+        
         if promo_detected:
-            promo_score += min(promo_count * 15, 40)  # Up to 40 points
+            promo_score += min(promo_count * 12, 30)  # Up to 30 points
         if has_phone:
             promo_score += 25
         if has_website_link:
-            promo_score += 20
-        if has_social_media:
-            promo_score += 10
+            promo_score += 15
         if has_email:
             promo_score += 10
         if has_prices and (promo_detected or has_phone):
             promo_score += 15  # Prices + contact = promotional
-        if text_density_score > 60:
-            promo_score += 10  # Too much text
         
         promo_score = min(promo_score, 100)
         
-        # Determine if promotional (threshold: 35)
-        is_promotional = promo_score >= 35
+        # Determine if promotional (threshold: 40)
+        is_promotional = promo_score >= 40
         
         return {
             "has_promotional_text": promo_detected,

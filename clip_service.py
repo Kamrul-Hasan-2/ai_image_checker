@@ -675,14 +675,14 @@ class CLIPService:
         max_idx = probs.argmax().item()
         illegal_product = self.illegal_products[max_idx]
         
-        # Consider illegal if confidence > 0.45
-        is_illegal = max_score > 0.45
+        # More strict threshold - only flag clearly illegal items (reduce false positives)
+        is_illegal = max_score > 0.65
         
         return {
             "is_illegal": is_illegal,
             "illegal_product": illegal_product if is_illegal else None,
             "confidence": max_score,
-            "all_scores": {prod: probs[i].item() for i, prod in enumerate(self.illegal_products) if probs[i].item() > 0.30}
+            "all_scores": {prod: probs[i].item() for i, prod in enumerate(self.illegal_products) if probs[i].item() > 0.50}
         }
     
     def check_watermark(self, image: Image.Image) -> Dict:
