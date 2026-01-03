@@ -98,19 +98,25 @@ def load_image(image_input: str) -> Image.Image:
 
 def check_image_quality(image: Image.Image) -> Dict[str, Any]:
     """Step 1: Quality check"""
+    global quality_service
     try:
         result = quality_service.check_image(image)
         checks = result.get("checks", {})
+        
+        # Get blur details from new multi-algorithm detection
+        blur_check = checks.get("blur", {})
+        blur_details = blur_check.get("details", {})
         
         return {
             "step": "quality_check",
             "passed": result["passed"],
             "confidence": 1.0 if result["passed"] else 0.0,
             "details": {
-                "blur_detection": "no" if checks.get("blur", {}).get("passed") else "yes",
-                "blur_score": checks.get("blur", {}).get("details", {}).get("blur_score", 0),
-                "screenshot_check": "no" if checks.get("screenshot_ui", {}).get("passed") else "yes",
-                "corruption_check": "no" if checks.get("corrupted", {}).get("passed") else "yes",
+                "blur_detection": "yes" if not blur_check.get("passed") else "no",
+                "blur_score": blur_details.get("combined_score", blur_details.get("laplacian_var", 0)),
+                "quality_grade": blur_details.get("quality_grade", "unknown"),
+                "screenshot_check": "yes" if not checks.get("screenshot_ui", {}).get("passed") else "no",
+                "corruption_check": "yes" if not checks.get("corrupted", {}).get("passed") else "no",
                 "resolution": f"{image.width}x{image.height}"
             }
         }
@@ -125,15 +131,22 @@ def check_image_quality(image: Image.Image) -> Dict[str, Any]:
 
 def check_with_ocr(image: Image.Image, category: str) -> Dict[str, Any]:
     """Step 2: OCR check"""
+    global ocr_service
     try:
         result = ocr_service.extract_text(image)
         full_text = result.get("full_text", "")
+        analysis = result.get("analysis", {})
         
         return {
             "step": "ocr_check",
             "passed": len(full_text) > 0,
-            "confidence": result.get("average_confidence", 0.5),
-            "image_extract": full_text[:200] if full_text else "No text detected"
+            "confidence": 0.5,
+            "image_extract": full_text[:200] if full_text else "No text detected",
+            "promotional_detected": analysis.get("is_promotional", False),
+            "promotional_score": analysis.get("promotional_score", 0),
+            "has_phone_number": analysis.get("has_phone_number", False),
+            "has_website_link": analysis.get("has_website_link", False),
+            "has_promotional_text": analysis.get("has_promotional_text", False)
         }
     except Exception as e:
         return {
@@ -147,27 +160,36 @@ def check_with_ocr(image: Image.Image, category: str) -> Dict[str, Any]:
 
 def check_with_clip(image: Image.Image, category: str) -> Dict[str, Any]:
     """Step 3: CLIP check"""
+    global clip_service
     try:
         result = clip_service.analyze_image(image)
         risk_analysis = result.get("risk_analysis", {})
-        category_match = result.get("category_match", {})
+        promo_analysis = result.get("promo_analysis", {})
+        category_analysis = result.get("category_analysis", {})
+        illegal_check = result.get("illegal_check", {})
+        
+        # Calculate risk level from weighted risk scoring
+        risk_level = int(risk_analysis.get("weighted_risk_level", 0))
         
         return {
             "step": "clip_check",
-            "passed": risk_analysis.get("risk_level", 0) < 85,
-            "confidence": category_match.get("score", 0.0),
+            "passed": risk_level < 85,
+            "confidence": 1.0 - (risk_level / 100.0),
             "details": {
-                "has_brand_indicators": "yes" if risk_analysis.get("has_brand_indicators") else "no",
-                "has_phone_number": "yes" if risk_analysis.get("has_phone_number") else "no",
-                "has_prices": "yes" if risk_analysis.get("has_prices") else "no",
-                "has_promotional_text": "yes" if risk_analysis.get("has_promotional_text") else "no",
-                "has_website_link": "yes" if risk_analysis.get("has_website_link") else "no",
-                "is_promotional": "yes" if risk_analysis.get("is_promotional") else "no",
-                "stock_photo": "no",  # Add stock photo detection if available
-                "illegal_photo": "no",  # Add illegal content detection if available
-                "category": category_match.get("category", category),
-                "category_match": "yes" if category_match.get("score", 0) > 0.5 else "no",
-                "risk_level": risk_analysis.get("risk_level", 0)
+                "category": category,
+                "category_match": "no",  # Can add category matching if needed
+                "has_brand_indicators": "no",
+                "has_phone_number": "no",
+                "has_prices": "no",
+                "has_promotional_text": "yes" if promo_analysis.get("is_promotional", False) else "no",
+                "has_website_link": "no",
+                "is_promotional": "yes" if promo_analysis.get("is_promotional", False) else "no",
+                "promotional_score": promo_analysis.get("promo_score", 0),
+                "stock_photo": "no",
+                "illegal_photo": "yes" if illegal_check.get("is_illegal", False) else "no",
+                "illegal_confidence": illegal_check.get("confidence", 0),
+                "risk_level": risk_level,
+                "max_risk_category": risk_analysis.get("max_risk_category", "unknown")
             }
         }
     except Exception as e:
@@ -182,6 +204,7 @@ def check_with_clip(image: Image.Image, category: str) -> Dict[str, Any]:
 
 def check_with_qwen(image: Image.Image, category: str, image_url: Optional[str] = None) -> Dict[str, Any]:
     """Step 4: Qwen2-VL check (only if risk >= 85)"""
+    global qwen2b_service
     try:
         result = qwen2b_service.moderate_image(image)
         decision = result.get("decision", "BLOCK").upper()
