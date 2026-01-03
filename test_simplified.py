@@ -58,30 +58,43 @@ for i in range(30):
         print("=" * 70)
         print("""
 {
-  "OpenCV": {
-    "blur_image": "yes/no",
-    "screen_short": "yes/no",
-    "too_small": "yes/no"
-  },
-  "ocr": {
-    "image_extract": "description"
-  },
-  "clip": {
-    "promotional_text": "yes/no",
-    "watermark": "yes/no",
-    "illegal": "yes/no",
-    "has_phone_number": "yes/no",
-    "promotional_score": 0.77,
-    "CATEGORY_MATCH": "yes/no",
-    "stock_photo": "no"
-  },
+  "blur_detection": "yes/no",
+  "blur_score": 28.5,
+  "screenshort_check": "yes/no",
+  "corruption_check": "yes/no",
+  
+  "image_extract": "Just some text about image",
+  
+  "has_brand_indicators": true/false,
+  "has_phone_number": true/false,
+  "has_prices": true/false,
+  "has_promotional_text": true/false,
+  "has_website_link": true/false,
+  "is_promotional": true/false,
+  "stock_photo": true/false,
+  "illegal_photo": true/false,
+  
+  "category": "Computer » Monitor » Monitor",
+  "category_match": true/false,
+  
+  "blur_image": 5,           // 5 if yes, 0 if no
+  "screen_short": 8,          // 8 if yes, 0 if no
+  "category_mismatch": 2,     // 2 if yes, 0 if no
+  "illegal": 9,               // 9 if yes, 0 if no
+  "promotional_text": 3,      // 3 if yes, 0 if no
+  "stock_photo_score": 10,    // 10 if yes, 0 if no
+  "watermark": 4,             // 4 if yes, 0 if no
+  
+  "total_risk_score": 12,
   "risk_level": 96,
+  
   "qwen_vl_2b": {  // Only if risk_level >= 85
-    "is_promotional_text": "yes/no",
+    "is_promotional_text": true/false,
     "image_description": "...",
-    "is_ai_generated": "yes/no",
-    "needs_manual_moderation": "yes/no"
+    "is_ai_generated": true/false,
+    "needs_manual_moderation": true/false
   },
+  
   "final_decision": "approved/rejected"
 }
         """)
