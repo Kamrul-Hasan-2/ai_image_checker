@@ -257,7 +257,7 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         watermark_detected = False  # Add watermark detection if available
         category_mismatch = clip_details.get("category_match", "no") == "no"
         
-        # Build simplified response with only severity scores
+        # Build minimal response with only severity scores
         response = {
             "blur_image": 5 if blur_detected else 0,
             "screen_short": 8 if screenshot_detected else 0,
@@ -266,15 +266,6 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
             "promotional_text": 3 if promotional_detected else 0,
             "stock_photo": 10 if stock_photo_detected else 0,
             "watermark": 4 if watermark_detected else 0,
-            "total_risk_score": (
-                (5 if blur_detected else 0) +
-                (8 if screenshot_detected else 0) +
-                (2 if category_mismatch else 0) +
-                (9 if illegal_detected else 0) +
-                (3 if promotional_detected else 0) +
-                (10 if stock_photo_detected else 0) +
-                (4 if watermark_detected else 0)
-            ),
             "risk_level": clip_details.get("risk_level", 0)
         }
         
@@ -283,12 +274,7 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         if risk_level >= 85:
             print("🤖 Step 4: Qwen2-VL Check (High Risk)")
             qwen_result = check_with_qwen(image, category, image_input if image_input.startswith('http') else None)
-            
             response["qwen_needs_moderation"] = not qwen_result.get("passed", False)
-        
-        # Calculate final decision based on risk scores
-        total_risk = response["total_risk_score"]
-        response["final_decision"] = "rejected" if total_risk > 0 or risk_level >= 85 else "approved"
         
         return response
         
@@ -296,7 +282,14 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         print(f"❌ Error processing image: {str(e)}")
         return {
             "error": str(e),
-            "final_decision": "rejected"
+            "blur_image": 0,
+            "screen_short": 0,
+            "category_mismatch": 0,
+            "illegal": 0,
+            "promotional_text": 0,
+            "stock_photo": 0,
+            "watermark": 0,
+            "risk_level": 0
         }
 
 
@@ -362,7 +355,14 @@ def run_pipeline(job: Dict[str, Any]) -> Dict[str, Any]:
                     results["results"].append({
                         "image_index": idx,
                         "error": "No image URL provided",
-                        "final_decision": False
+                        "blur_image": 0,
+                        "screen_short": 0,
+                        "category_mismatch": 0,
+                        "illegal": 0,
+                        "promotional_text": 0,
+                        "stock_photo": 0,
+                        "watermark": 0,
+                        "risk_level": 0
                     })
                     continue
                 
@@ -372,13 +372,9 @@ def run_pipeline(job: Dict[str, Any]) -> Dict[str, Any]:
                 results["results"].append(result)
             
             # Summary
-            approved = sum(1 for r in results["results"] if r.get("final_decision") == "approved")
-            rejected = len(results["results"]) - approved
-            
             results["summary"] = {
-                "approved": approved,
-                "rejected": rejected,
-                "success_rate": f"{(approved/len(results['results'])*100):.1f}%" if results["results"] else "0%"
+                "total": len(results["results"]),
+                "processed": sum(1 for r in results["results"] if "error" not in r or r.get("risk_level", 0) >= 0)
             }
             
             return results
