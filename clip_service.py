@@ -642,14 +642,18 @@ class CLIPService:
             "violent or graphic content"
         ]
         
-        # Promo banner indicators
+        # Promo banner indicators (expanded for better detection)
         self.promo_indicators = [
-            "promotional banner",
-            "advertisement banner",
-            "sale banner",
-            "discount banner",
-            "marketing banner",
-            "regular photo without banner"
+            "product photo with promotional banner overlay",
+            "image with sale or discount text overlay",
+            "advertisement banner with contact information",
+            "promotional image with phone numbers",
+            "marketing banner with website link",
+            "image with price tags and offers",
+            "banner with call to action text",
+            "promotional advertisement design",
+            "clean product photo without any text",
+            "regular product image without promotional elements"
         ]
     
     def check_illegal_content(self, image: Image.Image) -> Dict:
@@ -770,7 +774,7 @@ class CLIPService:
         """
         Assess content risk using CLIP
         Returns max risk score from: promo/weapon/medical/stock categories
-        Threshold: risk >= 0.70 requires escalation
+        Threshold: risk >= 0.55 requires escalation (lowered for better detection)
         """
         inputs = self.processor(
             text=self.risk_categories,
@@ -798,21 +802,31 @@ class CLIPService:
         max_risk_category = max(risk_scores, key=risk_scores.get)
         max_risk_score = risk_scores[max_risk_category]
         
-        # Determine action based on threshold
-        requires_escalation = max_risk_score >= 0.70
+        # More sensitive threshold: 0.55 instead of 0.70
+        requires_escalation = max_risk_score >= 0.55
+        
+        # Calculate weighted risk level (0-100)
+        weighted_risk = (
+            risk_scores["promo"] * 30 +
+            risk_scores["weapon"] * 100 +
+            risk_scores["medical"] * 80 +
+            risk_scores["stock"] * 70 +
+            risk_scores["violent"] * 100
+        )
         
         return {
             "scores": scores,
             "risk_scores": risk_scores,
             "max_risk": max_risk_score,
             "max_risk_category": max_risk_category,
+            "weighted_risk_level": min(weighted_risk, 100),
             "safe_score": scores["safe general content"],
             "requires_escalation": requires_escalation,
             "action": "ESCALATE_TO_QWEN2B" if requires_escalation else "APPROVE"
         }
     
     def detect_promo_banner(self, image: Image.Image) -> Dict:
-        """Detect if image contains promotional banner"""
+        """Detect if image contains promotional banner with enhanced sensitivity"""
         inputs = self.processor(
             text=self.promo_indicators,
             images=image,
@@ -826,12 +840,27 @@ class CLIPService:
             probs = logits_per_image.softmax(dim=1)[0]
         
         scores = {ind: float(prob) for ind, prob in zip(self.promo_indicators, probs)}
-        is_promo = scores["regular photo without banner"] < 0.5
+        
+        # Calculate promotional score (sum of all promo indicators)
+        promo_indicators_subset = self.promo_indicators[:-2]  # Exclude the "clean" labels
+        promo_score = sum(scores[ind] for ind in promo_indicators_subset)
+        clean_score = scores[self.promo_indicators[-2]] + scores[self.promo_indicators[-1]]
+        
+        # More sensitive threshold: 0.30 instead of 0.50
+        # If ANY promotional indicator scores > 0.25, flag it
+        max_promo_indicator = max((scores[ind] for ind in promo_indicators_subset), default=0)
+        is_promo = max_promo_indicator > 0.25 or promo_score > 0.35 or clean_score < 0.45
+        
+        # Calculate confidence
+        confidence = max_promo_indicator if is_promo else clean_score
         
         return {
             "scores": scores,
             "is_promotional": is_promo,
-            "confidence": 1.0 - scores["regular photo without banner"]
+            "confidence": confidence,
+            "promo_score": promo_score,
+            "clean_score": clean_score,
+            "max_promo_indicator": max_promo_indicator
         }
     
     def compare_brand_similarity(self, image1: Image.Image, image2: Image.Image) -> Dict:

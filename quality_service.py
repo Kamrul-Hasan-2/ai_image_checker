@@ -21,6 +21,49 @@ class QualityCheckService:
         
         print("Quality Check Service initialized")
     
+    def preprocess_image(self, image: Image.Image, enhance: bool = True) -> Image.Image:
+        """
+        Preprocess image for better detection
+        - Contrast enhancement
+        - Sharpening
+        - Noise reduction
+        """
+        if not enhance:
+            return image
+        
+        img_array = np.array(image)
+        
+        # Convert to LAB color space for better contrast adjustment
+        if len(img_array.shape) == 3:
+            lab = cv2.cvtColor(img_array, cv2.COLOR_RGB2LAB)
+            l, a, b = cv2.split(lab)
+            
+            # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to L channel
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            l_enhanced = clahe.apply(l)
+            
+            # Merge channels back
+            lab_enhanced = cv2.merge([l_enhanced, a, b])
+            enhanced = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2RGB)
+        else:
+            # Grayscale image
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            enhanced = clahe.apply(img_array)
+        
+        # Sharpen the image
+        kernel = np.array([[-1, -1, -1],
+                          [-1,  9, -1],
+                          [-1, -1, -1]])
+        sharpened = cv2.filter2D(enhanced, -1, kernel)
+        
+        # Denoise slightly (preserve edges)
+        if len(sharpened.shape) == 3:
+            denoised = cv2.fastNlMeansDenoisingColored(sharpened, None, 10, 10, 7, 21)
+        else:
+            denoised = cv2.fastNlMeansDenoising(sharpened, None, 10, 7, 21)
+        
+        return Image.fromarray(denoised)
+    
     def check_image(self, image: Image.Image, file_size: int = None) -> Dict:
         """
         Comprehensive image quality check
@@ -93,24 +136,79 @@ class QualityCheckService:
         }
     
     def _check_blur(self, image: Image.Image) -> Dict:
-        """Check if image is too blurry using Laplacian variance"""
+        """Check if image is too blurry using multiple algorithms"""
         # Convert to grayscale
         img_array = np.array(image.convert('L'))
         
-        # Calculate Laplacian variance
+        # Method 1: Laplacian variance (edge detection)
         laplacian_var = cv2.Laplacian(img_array, cv2.CV_64F).var()
         
-        if laplacian_var < self.blur_threshold:
+        # Method 2: Tenengrad (gradient magnitude)
+        gx = cv2.Sobel(img_array, cv2.CV_64F, 1, 0, ksize=3)
+        gy = cv2.Sobel(img_array, cv2.CV_64F, 0, 1, ksize=3)
+        tenengrad_score = np.mean(gx**2 + gy**2)
+        
+        # Method 3: FFT-based frequency analysis
+        fft = np.fft.fft2(img_array)
+        fft_shift = np.fft.fftshift(fft)
+        magnitude_spectrum = np.abs(fft_shift)
+        
+        # High frequency content indicates sharp image
+        h, w = magnitude_spectrum.shape
+        center_y, center_x = h // 2, w // 2
+        radius = min(h, w) // 4
+        
+        # Create mask for high frequencies (outer region)
+        y, x = np.ogrid[:h, :w]
+        mask = ((x - center_x)**2 + (y - center_y)**2) > radius**2
+        high_freq_energy = np.mean(magnitude_spectrum[mask])
+        
+        # Method 4: Edge density
+        edges = cv2.Canny(img_array, 50, 150)
+        edge_density = np.sum(edges > 0) / edges.size
+        
+        # Combined scoring (weighted average)
+        # Normalize scores
+        laplacian_normalized = min(laplacian_var / 500.0, 1.0)  # 500+ is very sharp
+        tenengrad_normalized = min(tenengrad_score / 1000.0, 1.0)  # 1000+ is very sharp
+        fft_normalized = min(high_freq_energy / 50.0, 1.0)  # Normalize FFT
+        edge_normalized = min(edge_density / 0.15, 1.0)  # 15%+ edges is sharp
+        
+        # Weighted combined score (0-100)
+        combined_score = (
+            laplacian_normalized * 35 +
+            tenengrad_normalized * 30 +
+            fft_normalized * 20 +
+            edge_normalized * 15
+        ) * 100
+        
+        # Thresholds:
+        # < 30: Very blurry (reject)
+        # 30-45: Slightly blurry (borderline)
+        # 45+: Acceptable
+        is_blurry = combined_score < 30
+        is_borderline = 30 <= combined_score < 45
+        
+        details = {
+            "combined_score": combined_score,
+            "laplacian_var": laplacian_var,
+            "tenengrad_score": tenengrad_score,
+            "high_freq_energy": high_freq_energy,
+            "edge_density": edge_density,
+            "quality_grade": "poor" if is_blurry else "borderline" if is_borderline else "good"
+        }
+        
+        if is_blurry:
             return {
                 "passed": False,
-                "reason": f"Image too blurry: {laplacian_var:.2f}",
-                "details": {"blur_score": laplacian_var}
+                "reason": f"Image too blurry (score: {combined_score:.1f}/100)",
+                "details": details
             }
         
         return {
             "passed": True,
-            "reason": "Image sharpness acceptable",
-            "details": {"blur_score": laplacian_var}
+            "reason": f"Image sharpness acceptable (score: {combined_score:.1f}/100)",
+            "details": details
         }
     
     def _check_corrupted(self, image: Image.Image) -> Dict:
