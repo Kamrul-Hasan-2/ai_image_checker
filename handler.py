@@ -257,41 +257,15 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         watermark_detected = False  # Add watermark detection if available
         category_mismatch = clip_details.get("category_match", "no") == "no"
         
-        # Build plain JSON response
+        # Build simplified response with only severity scores
         response = {
-            # Quality checks
-            "blur_detection": "yes" if blur_detected else "no",
-            "blur_score": quality_details.get("blur_score", 0),
-            "screenshort_check": "yes" if screenshot_detected else "no",
-            "corruption_check": quality_details.get("corruption_check", "no"),
-            
-            # OCR
-            "image_extract": ocr_result.get("image_extract", "No text detected"),
-            
-            # CLIP detection flags
-            "has_brand_indicators": clip_details.get("has_brand_indicators", "no") == "yes",
-            "has_phone_number": ocr_result.get("has_phone_number", False),
-            "has_prices": False,  # Can add from OCR if available
-            "has_promotional_text": promotional_detected,
-            "has_website_link": ocr_result.get("has_website_link", False),
-            "is_promotional": promotional_detected,
-            "stock_photo": stock_photo_detected,
-            "illegal_photo": illegal_detected,
-            
-            # Category
-            "category": category,
-            "category_match": clip_details.get("category_match", "no") == "yes",
-            
-            # Severity scores (number format)
             "blur_image": 5 if blur_detected else 0,
             "screen_short": 8 if screenshot_detected else 0,
             "category_mismatch": 2 if category_mismatch else 0,
             "illegal": 9 if illegal_detected else 0,
             "promotional_text": 3 if promotional_detected else 0,
-            "stock_photo_score": 10 if stock_photo_detected else 0,
+            "stock_photo": 10 if stock_photo_detected else 0,
             "watermark": 4 if watermark_detected else 0,
-            
-            # Total risk
             "total_risk_score": (
                 (5 if blur_detected else 0) +
                 (8 if screenshot_detected else 0) +
@@ -301,8 +275,6 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
                 (10 if stock_photo_detected else 0) +
                 (4 if watermark_detected else 0)
             ),
-            
-            # Risk level from CLIP
             "risk_level": clip_details.get("risk_level", 0)
         }
         
@@ -312,12 +284,7 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
             print("🤖 Step 4: Qwen2-VL Check (High Risk)")
             qwen_result = check_with_qwen(image, category, image_input if image_input.startswith('http') else None)
             
-            response["qwen_vl_2b"] = {
-                "is_promotional_text": not qwen_result.get("passed", False),
-                "image_description": qwen_result.get("reasoning", ""),
-                "is_ai_generated": False,
-                "needs_manual_moderation": not qwen_result.get("passed", False)
-            }
+            response["qwen_needs_moderation"] = not qwen_result.get("passed", False)
         
         # Calculate final decision based on risk scores
         total_risk = response["total_risk_score"]

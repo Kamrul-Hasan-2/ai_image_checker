@@ -54,48 +54,21 @@ for i in range(30):
         print(json.dumps(output, indent=2))
         
         print("\n" + "=" * 70)
-        print("EXPECTED FORMAT:")
+        print("EXPECTED MINIMAL FORMAT:")
         print("=" * 70)
         print("""
 {
-  "blur_detection": "yes/no",
-  "blur_score": 28.5,
-  "screenshort_check": "yes/no",
-  "corruption_check": "yes/no",
-  
-  "image_extract": "Just some text about image",
-  
-  "has_brand_indicators": true/false,
-  "has_phone_number": true/false,
-  "has_prices": true/false,
-  "has_promotional_text": true/false,
-  "has_website_link": true/false,
-  "is_promotional": true/false,
-  "stock_photo": true/false,
-  "illegal_photo": true/false,
-  
-  "category": "Computer » Monitor » Monitor",
-  "category_match": true/false,
-  
-  "blur_image": 5,           // 5 if yes, 0 if no
-  "screen_short": 8,          // 8 if yes, 0 if no
-  "category_mismatch": 2,     // 2 if yes, 0 if no
-  "illegal": 9,               // 9 if yes, 0 if no
-  "promotional_text": 3,      // 3 if yes, 0 if no
-  "stock_photo_score": 10,    // 10 if yes, 0 if no
-  "watermark": 4,             // 4 if yes, 0 if no
-  
-  "total_risk_score": 12,
+  "blur_image": 5,              // 5 if yes, 0 if no
+  "screen_short": 0,             // 8 if yes, 0 if no
+  "category_mismatch": 2,        // 2 if yes, 0 if no
+  "illegal": 0,                  // 9 if yes, 0 if no
+  "promotional_text": 3,         // 3 if yes, 0 if no
+  "stock_photo": 0,              // 10 if yes, 0 if no
+  "watermark": 0,                // 4 if yes, 0 if no
+  "total_risk_score": 10,
   "risk_level": 96,
-  
-  "qwen_vl_2b": {  // Only if risk_level >= 85
-    "is_promotional_text": true/false,
-    "image_description": "...",
-    "is_ai_generated": true/false,
-    "needs_manual_moderation": true/false
-  },
-  
-  "final_decision": "approved/rejected"
+  "qwen_needs_moderation": true, // Only if risk_level >= 85
+  "final_decision": "rejected"
 }
         """)
         
