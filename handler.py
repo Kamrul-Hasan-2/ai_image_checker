@@ -255,7 +255,7 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         illegal_detected = clip_details.get("illegal_photo", "no") == "yes"
         stock_photo_detected = clip_details.get("stock_photo", "no") == "yes"
         watermark_detected = False  # Add watermark detection if available
-        category_mismatch = clip_details.get("category_match", "no") == "no"
+        category_mismatch = False  # Disabled for now - needs proper category matching
         
         # Build minimal response with only severity scores
         response = {
