@@ -227,77 +227,74 @@ def check_with_qwen(image: Image.Image, category: str, image_url: Optional[str] 
 
 def process_single_image(image_input: str, category: str, pipeline_mode: str) -> Dict[str, Any]:
     """
-    Process a single image through the pipeline
+    Process a single image through the pipeline - Returns simplified JSON format
     """
     try:
         # Load image
         print(f"📸 Loading image for category: {category}")
         image = load_image(image_input)
         
-        results = {
-            "image": image_input[:100] + "..." if len(image_input) > 100 else image_input,
-            "category": category,
-            "pipeline_mode": pipeline_mode,
-            "steps": []
-        }
-        
-        # Step 1: Quality Check
+        # Step 1: Quality Check (OpenCV)
         print("🔍 Step 1: Quality Check")
         quality_result = check_image_quality(image)
-        results["steps"].append(quality_result)
-        
-        if pipeline_mode == "quality_only":
-            results["final_decision"] = quality_result["passed"]
-            results["final_confidence"] = quality_result["confidence"]
-            return results
-        
-        if not quality_result["passed"]:
-            results["final_decision"] = False
-            results["final_confidence"] = quality_result["confidence"]
-            results["reason"] = "Failed quality check"
-            return results
+        quality_details = quality_result.get("details", {})
         
         # Step 2: OCR Check
         print("📝 Step 2: OCR Check")
         ocr_result = check_with_ocr(image, category)
-        results["steps"].append(ocr_result)
         
-        # Step 3: CLIP Check (always run to get risk level)
+        # Step 3: CLIP Check
         print("🎨 Step 3: CLIP Check")
         clip_result = check_with_clip(image, category)
-        results["steps"].append(clip_result)
+        clip_details = clip_result.get("details", {})
         
-        risk_level = clip_result.get("details", {}).get("risk_level", 0)
-        results["risk_level"] = risk_level
+        # Get risk level
+        risk_level = clip_details.get("risk_level", 0)
         
-        # Only call Qwen2-VL if risk level >= 85
+        # Build simplified response
+        response = {
+            "OpenCV": {
+                "blur_image": quality_details.get("blur_detection", "no"),
+                "screen_short": quality_details.get("screenshot_check", "no"),
+                "too_small": "no"  # Can add resolution check if needed
+            },
+            "ocr": {
+                "image_extract": ocr_result.get("image_extract", "No text detected")
+            },
+            "clip": {
+                "promotional_text": clip_details.get("has_promotional_text", "no"),
+                "watermark": "no",  # Add watermark check if available
+                "illegal": clip_details.get("illegal_photo", "no"),
+                "has_phone_number": "yes" if ocr_result.get("has_phone_number", False) else "no",
+                "promotional_score": clip_details.get("promotional_score", 0),
+                "CATEGORY_MATCH": clip_details.get("category_match", "no"),
+                "stock_photo": clip_details.get("stock_photo", "no")
+            },
+            "risk_level": risk_level
+        }
+        
+        # Step 4: Qwen2-VL if risk >= 85
         if risk_level >= 85:
             print("🤖 Step 4: Qwen2-VL Check (High Risk)")
-            image_url = image_input if image_input.startswith('http') else None
-            qwen_result = check_with_qwen(image, category, image_url)
-            results["steps"].append(qwen_result)
+            qwen_result = check_with_qwen(image, category, image_input if image_input.startswith('http') else None)
             
-            results["final_decision"] = qwen_result["passed"]
-            results["final_confidence"] = qwen_result["confidence"]
-            results["matched_at"] = "qwen"
-            results["reasoning"] = qwen_result.get("reasoning", "")
-        else:
-            # Low risk - auto approve based on CLIP
-            results["final_decision"] = clip_result["passed"]
-            results["final_confidence"] = clip_result["confidence"]
-            results["matched_at"] = "clip"
-            results["reasoning"] = f"Risk level {risk_level} is below threshold (85), auto-approved"
+            response["qwen_vl_2b"] = {
+                "is_promotional_text": "yes" if not qwen_result.get("passed", False) else "no",
+                "image_description": qwen_result.get("reasoning", ""),
+                "is_ai_generated": "no",  # Add AI detection if needed
+                "needs_manual_moderation": "yes" if not qwen_result.get("passed", False) else "no"
+            }
         
-        return results
+        # Add final decision
+        response["final_decision"] = "approved" if quality_result.get("passed") and risk_level < 85 else "rejected"
+        
+        return response
         
     except Exception as e:
         print(f"❌ Error processing image: {str(e)}")
         return {
-            "image": image_input[:100] + "..." if len(image_input) > 100 else image_input,
-            "category": category,
             "error": str(e),
-            "final_decision": False,
-            "final_confidence": 0.0
+            "final_decision": "rejected"
         }
 
 
@@ -373,7 +370,7 @@ def run_pipeline(job: Dict[str, Any]) -> Dict[str, Any]:
                 results["results"].append(result)
             
             # Summary
-            approved = sum(1 for r in results["results"] if r.get("final_decision", False))
+            approved = sum(1 for r in results["results"] if r.get("final_decision") == "approved")
             rejected = len(results["results"]) - approved
             
             results["summary"] = {
