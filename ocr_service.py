@@ -78,25 +78,42 @@ class OCRService:
             'cash on delivery', 'cod', 'free delivery', 'home delivery', 'free shipping',
             # Payment
             'emi', 'installment',
-            # Marketplace watermarks (VERY strong indicator)
-            'bikroy', 'daraz', 'olx',
             # Bengali
             'অফার', 'ডিসকাউন‌্ট', 'সেল', 'কিনুন', 'অর্ডার'
         ]
         
-        # Brand names are NOT promotional (exclude these)
-        brand_names = [
-            'apple', 'samsung', 'sony', 'lg', 'dell', 'hp', 'asus', 'lenovo',
+        # Third-party marketplace/seller names - PROMOTIONAL
+        third_party_sellers = [
+            'bikroy', 'daraz', 'olx', 'ajkerdeal', 'pickaboo', 'ekhanei',
+            'chaldal', 'foodpanda', 'pathao', 'sheba', 'ryans', 'startech'
+        ]
+        
+        # Product brand names - NOT PROMOTIONAL (manufacturer brands)
+        product_brands = [
+            # Laptops/Computers
+            'hp', 'dell', 'lenovo', 'asus', 'acer', 'msi', 'apple', 'microsoft',
+            'razer', 'alienware', 'toshiba', 'fujitsu', 'samsung',
+            # Phones
             'xiaomi', 'huawei', 'oppo', 'vivo', 'realme', 'oneplus', 'nokia',
-            'canon', 'nikon', 'panasonic', 'philips', 'bosch', 'microsoft',
-            'intel', 'amd', 'nvidia', 'logitech', 'razer', 'corsair'
+            'motorola', 'sony', 'lg', 'google', 'infinix', 'tecno', 'itel',
+            # Electronics
+            'canon', 'nikon', 'panasonic', 'philips', 'bosch', 'whirlpool',
+            'intel', 'amd', 'nvidia', 'logitech', 'corsair', 'kingston',
+            # Appliances
+            'walton', 'singer', 'vision', 'butterfly', 'miyako', 'sharp'
         ]
         
         # Count promotional keywords (excluding brand names)
         promo_count = sum(1 for keyword in promo_keywords if keyword in full_text_lower)
         
-        # Check if text is just a brand name (not promotional)
-        is_just_brand = any(brand in full_text_lower for brand in brand_names) and promo_count == 0
+        # Check for third-party seller/marketplace names (PROMOTIONAL)
+        has_third_party_seller = any(seller in full_text_lower for seller in third_party_sellers)
+        
+        # Check if text contains product brand (NOT promotional)
+        has_product_brand = any(brand in full_text_lower for brand in product_brands)
+        
+        # If ONLY product brand name without promo keywords = NOT promotional
+        is_just_brand = has_product_brand and promo_count == 0 and not has_third_party_seller
         
         promo_detected = promo_count > 0 and not is_just_brand
         
@@ -119,7 +136,7 @@ class OCRService:
             r'\w+\.(?:com|bd|net|org|shop|store|online)'
         ]
         has_website_link = any(re.search(pattern, full_text_lower) for pattern in website_patterns)
-        has_marketplace_watermark = bool(re.search(r'bikroy|daraz|olx', full_text_lower))
+        has_marketplace_watermark = has_third_party_seller or bool(re.search(r'bikroy|daraz|olx', full_text_lower))
         
         # Social media handles
         social_pattern = r'@\w+|#\w+'
