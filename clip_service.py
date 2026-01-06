@@ -7,9 +7,10 @@ CLIP Service for fast image analysis:
 
 import torch
 from transformers import CLIPProcessor, CLIPModel
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 import numpy as np
 from typing import List, Dict, Tuple
+import cv2
 
 
 class CLIPService:
@@ -24,6 +25,52 @@ class CLIPService:
         
         # Temperature scaling for better calibration
         self.temperature = 1.0
+        
+    def _preprocess_for_text_detection(self, image: Image.Image) -> List[Image.Image]:
+        """Generate multiple preprocessed versions to enhance text/watermark visibility"""
+        preprocessed = []
+        
+        # Original
+        preprocessed.append(image)
+        
+        # High contrast version (helps detect watermarks)
+        enhancer = ImageEnhance.Contrast(image)
+        high_contrast = enhancer.enhance(2.0)
+        preprocessed.append(high_contrast)
+        
+        # Sharpened version (enhances text edges)
+        sharpened = image.filter(ImageFilter.SHARPEN)
+        preprocessed.append(sharpened)
+        
+        # Brightness adjusted (helps with faded watermarks)
+        brightness = ImageEnhance.Brightness(image)
+        brightened = brightness.enhance(1.3)
+        preprocessed.append(brightened)
+        
+        return preprocessed
+    
+    def _analyze_image_regions(self, image: Image.Image) -> List[Image.Image]:
+        """Split image into regions to detect watermarks in specific locations"""
+        regions = []
+        width, height = image.size
+        
+        # Full image
+        regions.append(image)
+        
+        # Bottom region (common watermark location)
+        bottom_region = image.crop((0, int(height * 0.7), width, height))
+        regions.append(bottom_region)
+        
+        # Top region
+        top_region = image.crop((0, 0, width, int(height * 0.3)))
+        regions.append(top_region)
+        
+        # Center region
+        center_region = image.crop((int(width * 0.2), int(height * 0.3), 
+                                   int(width * 0.8), int(height * 0.7)))
+        regions.append(center_region)
+        
+        return regions
         
         # Define categories for classification
         self.categories = [
@@ -697,55 +744,85 @@ class CLIPService:
         }
     
     def check_watermark(self, image: Image.Image) -> Dict:
-        """Check if image has website watermark (bikroy, daraz, etc.)"""
+        """Check if image has website watermark using feature engineering"""
         # Convert image to RGB if needed
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
-        # Specific watermark labels for BD e-commerce sites
+        # Enhanced prompts focusing on visual features CLIP can see
         watermark_labels = [
-            "photo with bikroy watermark text overlay",
-            "photo with bikroy.com logo watermark",
-            "photo with daraz watermark logo",
-            "photo with website text watermark",
-            "clean photo without watermark"
+            "photo with text overlay on image",
+            "image with transparent text watermark",
+            "photo with website logo overlay",
+            "picture with text stamp",
+            "clean photo without text overlay"
         ]
         
-        inputs = self.processor(
-            text=watermark_labels,
-            images=image,
-            return_tensors="pt",
-            padding=True
-        ).to(self.device)
+        max_watermark_score = 0
+        max_clean_score = 0
+        detection_count = 0
         
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-            logits_per_image = outputs.logits_per_image / self.temperature
-            probs = logits_per_image.softmax(dim=1)[0]
+        # Strategy 1: Analyze preprocessed versions
+        preprocessed_images = self._preprocess_for_text_detection(image)
+        for prep_img in preprocessed_images:
+            inputs = self.processor(
+                text=watermark_labels,
+                images=prep_img,
+                return_tensors="pt",
+                padding=True
+            ).to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits_per_image = outputs.logits_per_image / self.temperature
+                probs = logits_per_image.softmax(dim=1)[0]
+            
+            # Get watermark and clean scores
+            watermark_score = probs[:4].max().item()
+            clean_score = probs[4].item()
+            
+            max_watermark_score = max(max_watermark_score, watermark_score)
+            max_clean_score = max(max_clean_score, clean_score)
+            
+            # Count detections
+            if watermark_score > 0.22:
+                detection_count += 1
         
-        # Last label is "clean image"
-        clean_score = probs[4].item()
-        watermark_scores = probs[:4].max().item()
-        max_watermark_idx = probs[:4].argmax().item()
+        # Strategy 2: Check specific regions (watermarks often in corners/bottom)
+        regions = self._analyze_image_regions(image)
+        for region in regions[1:]:  # Skip full image, already analyzed
+            inputs = self.processor(
+                text=watermark_labels,
+                images=region,
+                return_tensors="pt",
+                padding=True
+            ).to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits_per_image = outputs.logits_per_image / self.temperature
+                probs = logits_per_image.softmax(dim=1)[0]
+            
+            watermark_score = probs[:4].max().item()
+            max_watermark_score = max(max_watermark_score, watermark_score)
+            
+            if watermark_score > 0.25:
+                detection_count += 1
         
-        # More sensitive - detect watermark if score > 0.25 OR watermark_score > clean_score
-        has_watermark = watermark_scores > 0.25 or (watermark_scores > clean_score and watermark_scores > 0.20)
+        # Decision logic: multiple signals increase confidence
+        has_watermark = (
+            max_watermark_score > 0.28 or  # High confidence single detection
+            detection_count >= 2 or  # Multiple regions show watermark
+            (max_watermark_score > 0.22 and max_watermark_score > max_clean_score * 1.3)  # Score significantly higher than clean
+        )
         
-        watermark_type = None
-        if has_watermark:
-            if max_watermark_idx == 0 or max_watermark_idx == 1:
-                watermark_type = "bikroy"
-            elif max_watermark_idx == 2:
-                watermark_type = "daraz"
-            elif max_watermark_idx == 3:
-                watermark_type = "website"
-            else:
-                watermark_type = "marketplace"
+        watermark_type = "website" if has_watermark else None
         
         return {
             "has_watermark": has_watermark,
             "watermark_type": watermark_type,
-            "confidence": watermark_scores if has_watermark else clean_score
+            "confidence": max_watermark_score,
+            "detection_count": detection_count
         }
     
     def analyze_image(self, image: Image.Image) -> Dict:
@@ -845,47 +922,92 @@ class CLIPService:
         }
     
     def detect_promo_banner(self, image: Image.Image) -> Dict:
-        """Detect if image contains promotional banner - NOT just brand names"""
+        """Detect promotional content using advanced feature engineering"""
         # Convert image to RGB if needed
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
-        inputs = self.processor(
-            text=self.promo_indicators,
-            images=image,
-            return_tensors="pt",
-            padding=True
-        ).to(self.device)
+        # Enhanced prompts focusing on visual promotional elements
+        promo_labels = [
+            "advertisement poster with sale text",
+            "promotional banner with discount",
+            "photo with contact information",
+            "marketing flyer design",
+            "seller advertisement image",
+            "product photo without ads",
+            "clean product image"
+        ]
         
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-            logits_per_image = outputs.logits_per_image / self.temperature
-            probs = logits_per_image.softmax(dim=1)[0]
+        max_promo_score = 0
+        max_clean_score = 0
+        promo_detection_count = 0
         
-        scores = {ind: float(prob) for ind, prob in zip(self.promo_indicators, probs)}
+        # Strategy 1: Analyze with contrast enhancement (makes text pop)
+        preprocessed_images = self._preprocess_for_text_detection(image)
+        for prep_img in preprocessed_images:
+            inputs = self.processor(
+                text=promo_labels,
+                images=prep_img,
+                return_tensors="pt",
+                padding=True
+            ).to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits_per_image = outputs.logits_per_image / self.temperature
+                probs = logits_per_image.softmax(dim=1)[0]
+            
+            # Promo indicators vs clean product
+            promo_score = probs[:5].max().item()
+            clean_score = probs[5:].max().item()
+            
+            max_promo_score = max(max_promo_score, promo_score)
+            max_clean_score = max(max_clean_score, clean_score)
+            
+            # Count strong detections
+            if promo_score > 0.35:
+                promo_detection_count += 1
         
-        # Calculate promotional score (sum of promo indicators, excluding clean photos)
-        promo_indicators_subset = self.promo_indicators[:-2]  # Exclude clean/regular labels
-        promo_score = sum(scores[ind] for ind in promo_indicators_subset)
-        clean_score = scores[self.promo_indicators[-2]] + scores[self.promo_indicators[-1]]
+        # Strategy 2: Check for text-heavy regions (promotional images have more text)
+        regions = self._analyze_image_regions(image)
+        text_region_scores = []
         
-        # Stricter threshold - brand names alone should NOT trigger
-        # Need clear promotional elements (discount, phone, website watermark)
-        max_promo_indicator = max((scores[ind] for ind in promo_indicators_subset), default=0)
+        for region in regions:
+            # Use simpler prompt for region analysis
+            region_labels = ["image with text overlay", "image without text"]
+            inputs = self.processor(
+                text=region_labels,
+                images=region,
+                return_tensors="pt",
+                padding=True
+            ).to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits_per_image = outputs.logits_per_image / self.temperature
+                probs = logits_per_image.softmax(dim=1)[0]
+            
+            text_region_scores.append(probs[0].item())
         
-        # Much higher threshold - only flag OBVIOUS promotional content
-        is_promo = max_promo_indicator > 0.40 or promo_score > 0.60
+        # High text coverage suggests promotional content
+        avg_text_score = sum(text_region_scores) / len(text_region_scores)
+        has_high_text_coverage = avg_text_score > 0.5
         
-        # Calculate confidence
-        confidence = max_promo_indicator if is_promo else clean_score
+        # Decision logic: combine multiple signals
+        is_promotional = (
+            max_promo_score > 0.42 or  # High confidence detection
+            promo_detection_count >= 2 or  # Multiple preprocessed versions detect promo
+            (max_promo_score > 0.35 and has_high_text_coverage) or  # Moderate score + text overlay
+            (max_promo_score > max_clean_score * 1.4 and max_promo_score > 0.30)  # Significantly more promo than clean
+        )
         
         return {
-            "scores": scores,
-            "is_promotional": is_promo,
-            "confidence": confidence,
-            "promo_score": promo_score,
-            "clean_score": clean_score,
-            "max_promo_indicator": max_promo_indicator
+            "is_promotional": is_promotional,
+            "confidence": max_promo_score,
+            "promo_score": max_promo_score,
+            "clean_score": max_clean_score,
+            "text_coverage": avg_text_score,
+            "detection_count": promo_detection_count
         }
     
     def compare_brand_similarity(self, image1: Image.Image, image2: Image.Image) -> Dict:
