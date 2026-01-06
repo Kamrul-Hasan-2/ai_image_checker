@@ -695,13 +695,13 @@ class CLIPService:
         
         # Calculate confidence: check if top score is significantly higher than others
         confidence_gap = max_score - top3_values[1].item() if len(top3_values) > 1 else max_score
-        is_confident = confidence_gap > 0.15  # Significant gap between top scores
+        is_confident = confidence_gap > 0.20  # Very significant gap required
         
-        # Adaptive threshold based on confidence
-        # High threshold = fewer false positives
-        if is_confident and max_score > 0.70:
+        # Very strict threshold - only flag OBVIOUS illegal items
+        # Normal products like laptops should NEVER trigger this
+        if is_confident and max_score > 0.80:  # Need both high confidence AND large gap
             is_illegal = True
-        elif max_score > 0.75:  # Very high score even without confidence gap
+        elif max_score > 0.85:  # Extremely high score alone
             is_illegal = True
         else:
             is_illegal = False
@@ -711,7 +711,7 @@ class CLIPService:
             "illegal_product": illegal_product if is_illegal else None,
             "confidence": max_score,
             "confidence_gap": confidence_gap,
-            "all_scores": {prod: probs[i].item() for i, prod in enumerate(self.illegal_products) if probs[i].item() > 0.50}
+            "all_scores": {prod: probs[i].item() for i, prod in enumerate(self.illegal_products) if probs[i].item() > 0.60}
         }
     
     def check_watermark(self, image: Image.Image) -> Dict:
