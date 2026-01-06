@@ -262,9 +262,18 @@ class QualityCheckService:
         edges = cv2.Canny(gray, 50, 150)
         edge_density = np.sum(edges > 0) / edges.size
         
-        # Very strict threshold - only flag obvious screenshots with UI elements
-        # High edge density (>25%) AND many perfect rectangles = likely screenshot
-        if edge_density > 0.25:  # More than 25% edges (very high)
+        # Extremely strict threshold - only flag obvious UI screenshots
+        # Physical product photos with ports/holes should NOT be flagged
+        if edge_density > 0.30:  # More than 30% edges (extremely high)
+            # Check for text-like patterns (screenshots usually have lots of text)
+            # Use horizontal and vertical line detection
+            horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+            vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
+            horizontal_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, horizontal_kernel)
+            vertical_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, vertical_kernel)
+            
+            line_density = (np.sum(horizontal_lines > 0) + np.sum(vertical_lines > 0)) / edges.size
+            
             # Additional check: look for MANY rectangular regions
             contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             rectangular_contours = 0
@@ -274,13 +283,14 @@ class QualityCheckService:
                 if len(approx) == 4:  # Rectangle
                     rectangular_contours += 1
             
-            # Need MANY rectangles (>50) to be screenshot
-            if rectangular_contours > 50:  # Many rectangles suggest UI
+            # Need HIGH line density (UI elements) AND MANY rectangles (>100)
+            if line_density > 0.10 and rectangular_contours > 100:
                 return {
                     "passed": False,
                     "reason": "Likely screenshot or UI element",
                     "details": {
                         "edge_density": edge_density,
+                        "line_density": line_density,
                         "rectangles": rectangular_contours
                     }
                 }
