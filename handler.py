@@ -253,9 +253,10 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         promo_confidence_ocr = ocr_result.get("promotional_confidence", 0.0)
         watermark_keywords = ocr_result.get("watermark_keywords_found", False)
         promo_keyword_count = ocr_result.get("promo_keyword_count", 0)
+        seller_branding = ocr_result.get("seller_branding_detected", False)
         
         print(f"   OCR Risk: {ocr_risk:.2f} | Watermark: {watermark_confidence_ocr:.2f} | Promo: {promo_confidence_ocr:.2f}")
-        print(f"   Watermark Keywords: {watermark_keywords} | Promo Keywords: {promo_keyword_count}")
+        print(f"   Watermark Keywords: {watermark_keywords} | Promo Keywords: {promo_keyword_count} | Seller Branding: {seller_branding}")
         
         # ========== STEP 3: CLIP (WEAK SIGNAL) ==========
         print("🎨 Step 3: CLIP Visual Analysis (WEAK SIGNAL)")
@@ -335,8 +336,9 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
             0.30 * qwen_promo_score +          # Qwen reasoning
             0.20 * promo_confidence_clip       # CLIP weakest
         )
-        promotional_detected = promo_risk > 0.5 or promo_keyword_count >= 3
-        print(f"   Promo Risk: {promo_risk:.2f} (OCR: {promo_confidence_ocr:.2f}, Qwen: {qwen_promo_score:.2f}, CLIP: {promo_confidence_clip:.2f})")
+        # HARD RULE: Seller branding is promotional
+        promotional_detected = promo_risk > 0.5 or promo_keyword_count >= 3 or seller_branding
+        print(f"   Promo Risk: {promo_risk:.2f} (OCR: {promo_confidence_ocr:.2f}, Qwen: {qwen_promo_score:.2f}, CLIP: {promo_confidence_clip:.2f}, Seller: {seller_branding})")
         
         # ILLEGAL DETECTION (Very strict - requires high Qwen + CLIP agreement)
         illegal_risk = (
