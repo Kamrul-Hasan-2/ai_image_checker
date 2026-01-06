@@ -635,18 +635,16 @@ class CLIPService:
             "violent or graphic content"
         ]
         
-        # Promo banner indicators (expanded for better detection)
+        # Promo banner indicators (focus on ACTUAL promotional content, not brand names)
         self.promo_indicators = [
-            "product photo with promotional banner overlay",
-            "image with sale or discount text overlay",
-            "advertisement banner with contact information",
-            "promotional image with phone numbers",
-            "marketing banner with website link",
-            "image with price tags and offers",
-            "banner with call to action text",
-            "promotional advertisement design",
-            "clean product photo without any text",
-            "regular product image without promotional elements"
+            "advertisement with discount offer text",
+            "promotional banner with sale prices",
+            "image with phone number and contact info",
+            "marketing poster with call to action",
+            "advertisement with website watermark bikroy daraz",
+            "promotional flyer with special offers",
+            "clean product photo with brand name only",
+            "regular product image without promotional text"
         ]
     
     def check_illegal_content(self, image: Image.Image) -> Dict:
@@ -831,7 +829,7 @@ class CLIPService:
         }
     
     def detect_promo_banner(self, image: Image.Image) -> Dict:
-        """Detect if image contains promotional banner with enhanced sensitivity"""
+        """Detect if image contains promotional banner - NOT just brand names"""
         inputs = self.processor(
             text=self.promo_indicators,
             images=image,
@@ -846,15 +844,17 @@ class CLIPService:
         
         scores = {ind: float(prob) for ind, prob in zip(self.promo_indicators, probs)}
         
-        # Calculate promotional score (sum of all promo indicators)
-        promo_indicators_subset = self.promo_indicators[:-2]  # Exclude the "clean" labels
+        # Calculate promotional score (sum of promo indicators, excluding clean photos)
+        promo_indicators_subset = self.promo_indicators[:-2]  # Exclude clean/regular labels
         promo_score = sum(scores[ind] for ind in promo_indicators_subset)
         clean_score = scores[self.promo_indicators[-2]] + scores[self.promo_indicators[-1]]
         
-        # More sensitive threshold: 0.30 instead of 0.50
-        # If ANY promotional indicator scores > 0.25, flag it
+        # Stricter threshold - brand names alone should NOT trigger
+        # Need clear promotional elements (discount, phone, website watermark)
         max_promo_indicator = max((scores[ind] for ind in promo_indicators_subset), default=0)
-        is_promo = max_promo_indicator > 0.25 or promo_score > 0.35 or clean_score < 0.45
+        
+        # Much higher threshold - only flag OBVIOUS promotional content
+        is_promo = max_promo_indicator > 0.40 or promo_score > 0.60
         
         # Calculate confidence
         confidence = max_promo_indicator if is_promo else clean_score
