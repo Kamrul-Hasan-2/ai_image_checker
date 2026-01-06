@@ -262,10 +262,10 @@ class QualityCheckService:
         edges = cv2.Canny(gray, 50, 150)
         edge_density = np.sum(edges > 0) / edges.size
         
-        # High edge density might indicate UI elements/screenshots
-        # This is a simple heuristic - can be refined
-        if edge_density > 0.15:  # More than 15% edges
-            # Additional check: look for rectangular regions
+        # Very strict threshold - only flag obvious screenshots with UI elements
+        # High edge density (>25%) AND many perfect rectangles = likely screenshot
+        if edge_density > 0.25:  # More than 25% edges (very high)
+            # Additional check: look for MANY rectangular regions
             contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             rectangular_contours = 0
             for contour in contours:
@@ -274,7 +274,8 @@ class QualityCheckService:
                 if len(approx) == 4:  # Rectangle
                     rectangular_contours += 1
             
-            if rectangular_contours > 10:  # Many rectangles suggest UI
+            # Need MANY rectangles (>50) to be screenshot
+            if rectangular_contours > 50:  # Many rectangles suggest UI
                 return {
                     "passed": False,
                     "reason": "Likely screenshot or UI element",

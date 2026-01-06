@@ -612,41 +612,17 @@ class CLIPService:
             ]
 
         # Illegal products list
-        # Bangladesh-specific illegal products (highly specific descriptions)
+        # Bangladesh-specific illegal products (ONLY truly dangerous items)
         self.illegal_products = [
-            # Firearms - very specific
-            "handgun pistol with bullets", "rifle firearm with ammunition", "shotgun weapon", 
-            "automatic assault rifle", "revolver pistol", "gun barrel and trigger",
+            # Firearms only
+            "real gun handgun pistol", "real rifle firearm", "real shotgun weapon",
             
-            # Ammunition & explosives
-            "bullet cartridges ammunition", "bomb explosive device", "hand grenade", 
-            "landmine explosive", "TNT dynamite", "gunpowder explosive powder",
+            # Drugs only  
+            "heroin drug powder", "cocaine white drug", "yaba drug pills",
+            "marijuana cannabis drug", "methamphetamine crystal drug",
             
-            # Sharp weapons
-            "sword blade weapon", "dagger knife blade", "switchblade knife", 
-            "machete blade", "combat knife weapon",
-            
-            # Drugs - Bangladesh specific
-            "heroin powder drug", "cocaine white powder", "yaba pink pills tablets", 
-            "methamphetamine crystal meth", "marijuana cannabis plant", 
-            "drug syringes needles", "opium poppy plant",
-            
-            # Poison & chemicals
-            "poison toxic liquid bottle", "cyanide chemical powder", 
-            "toxic chemical hazard", "acid corrosive liquid",
-            
-            # Counterfeit documents
-            "fake passport document", "counterfeit money bills", 
-            "forged identity card NID", "fake certificate diploma",
-            
-            # Wildlife & illegal items
-            "ivory tusk elephant", "tiger skin fur", "illegal wildlife animal parts",
-            
-            # Adult content
-            "pornographic explicit sexual image", "nude explicit content",
-            
-            # Other illegal
-            "stolen credit cards", "hacking device equipment"
+            # Explosives only
+            "bomb explosive device", "hand grenade weapon", "TNT explosive"
         ]
         
         # Define risk categories (NEW REQUIREMENTS)
