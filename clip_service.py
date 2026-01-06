@@ -18,8 +18,12 @@ class CLIPService:
         print(f"Loading CLIP model: {model_name}")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = CLIPModel.from_pretrained(model_name).to(self.device)
+        self.model.eval()  # Set to evaluation mode for better inference
         self.processor = CLIPProcessor.from_pretrained(model_name)
         print(f"CLIP model loaded on {self.device}")
+        
+        # Temperature scaling for better calibration
+        self.temperature = 1.0
         
         # Define categories for classification
         self.categories = [
@@ -639,18 +643,22 @@ class CLIPService:
         
         # Promo banner indicators (focus on ACTUAL promotional content, not brand names)
         self.promo_indicators = [
-            "advertisement with discount offer text",
-            "promotional banner with sale prices",
-            "image with phone number and contact info",
-            "marketing poster with call to action",
-            "advertisement with website watermark bikroy daraz",
-            "promotional flyer with special offers",
-            "clean product photo with brand name only",
-            "regular product image without promotional text"
+            "advertisement with discount sale text",
+            "promotional banner with prices",
+            "photo with phone number contact",
+            "marketing poster advertisement",
+            "seller advertisement with watermark",
+            "promotional flyer with offers",
+            "clean product photo only",
+            "regular product image"
         ]
     
     def check_illegal_content(self, image: Image.Image) -> Dict:
         """Check if image contains illegal products with enhanced accuracy"""
+        # Convert image to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
         inputs = self.processor(
             text=self.illegal_products,
             images=image,
@@ -660,7 +668,7 @@ class CLIPService:
         
         with torch.no_grad():
             outputs = self.model(**inputs)
-            logits_per_image = outputs.logits_per_image
+            logits_per_image = outputs.logits_per_image / self.temperature
             probs = logits_per_image.softmax(dim=1)[0]
         
         # Get top 3 scores for better accuracy
@@ -690,13 +698,17 @@ class CLIPService:
     
     def check_watermark(self, image: Image.Image) -> Dict:
         """Check if image has website watermark (bikroy, daraz, etc.)"""
+        # Convert image to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
         # Specific watermark labels for BD e-commerce sites
         watermark_labels = [
-            "image with large bikroy text overlay watermark",
-            "image with bikroy.com transparent watermark",
-            "image with daraz text watermark overlay",
-            "image with marketplace website watermark",
-            "clean product photo without any watermark"
+            "photo with bikroy watermark text overlay",
+            "photo with bikroy.com logo watermark",
+            "photo with daraz watermark logo",
+            "photo with website text watermark",
+            "clean photo without watermark"
         ]
         
         inputs = self.processor(
@@ -708,7 +720,7 @@ class CLIPService:
         
         with torch.no_grad():
             outputs = self.model(**inputs)
-            logits_per_image = outputs.logits_per_image
+            logits_per_image = outputs.logits_per_image / self.temperature
             probs = logits_per_image.softmax(dim=1)[0]
         
         # Last label is "clean image"
@@ -779,6 +791,10 @@ class CLIPService:
         Returns max risk score from: promo/weapon/medical/stock categories
         Threshold: risk >= 0.55 requires escalation (lowered for better detection)
         """
+        # Convert image to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
         inputs = self.processor(
             text=self.risk_categories,
             images=image,
@@ -788,7 +804,7 @@ class CLIPService:
         
         with torch.no_grad():
             outputs = self.model(**inputs)
-            logits_per_image = outputs.logits_per_image
+            logits_per_image = outputs.logits_per_image / self.temperature
             probs = logits_per_image.softmax(dim=1)[0]
         
         scores = {cat: float(prob) for cat, prob in zip(self.risk_categories, probs)}
@@ -830,6 +846,10 @@ class CLIPService:
     
     def detect_promo_banner(self, image: Image.Image) -> Dict:
         """Detect if image contains promotional banner - NOT just brand names"""
+        # Convert image to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
         inputs = self.processor(
             text=self.promo_indicators,
             images=image,
@@ -839,7 +859,7 @@ class CLIPService:
         
         with torch.no_grad():
             outputs = self.model(**inputs)
-            logits_per_image = outputs.logits_per_image
+            logits_per_image = outputs.logits_per_image / self.temperature
             probs = logits_per_image.softmax(dim=1)[0]
         
         scores = {ind: float(prob) for ind, prob in zip(self.promo_indicators, probs)}
