@@ -612,17 +612,19 @@ class CLIPService:
             ]
 
         # Illegal products list
-        # Bangladesh-specific illegal products (ONLY truly dangerous items)
+        # Bangladesh-specific illegal products (ONLY truly dangerous/inappropriate items)
         self.illegal_products = [
-            # Firearms only
-            "real gun handgun pistol", "real rifle firearm", "real shotgun weapon",
+            # Real weapons only - very specific
+            "real loaded gun firearm weapon", "real pistol handgun with trigger", 
+            "real rifle assault weapon", "real shotgun firearm",
             
-            # Drugs only  
-            "heroin drug powder", "cocaine white drug", "yaba drug pills",
-            "marijuana cannabis drug", "methamphetamine crystal drug",
+            # Adult/inappropriate content
+            "naked nude woman explicit content", "pornographic sexual explicit image",
+            "nude adult explicit photo",
             
-            # Explosives only
-            "bomb explosive device", "hand grenade weapon", "TNT explosive"
+            # Real drugs
+            "heroin drug narcotic substance", "cocaine drug powder",
+            "yaba drug pills tablets", "marijuana cannabis drug"
         ]
         
         # Define risk categories (NEW REQUIREMENTS)
@@ -669,18 +671,23 @@ class CLIPService:
         
         # Calculate confidence: check if top score is significantly higher than others
         confidence_gap = max_score - top3_values[1].item() if len(top3_values) > 1 else max_score
+        is_confident = confidence_gap > 0.35  # Very large confidence gap
         
-        # Completely disabled for practical purposes
-        # Would need to be a PERFECT match to real gun/drug photo to trigger
-        # Normal products will NEVER trigger this
-        is_illegal = False  # Always return false - illegal detection disabled
+        # Very strict but functional - only flag obvious weapons/guns/adult content
+        # Electronics/laptops should NEVER match these descriptions
+        if is_confident and max_score > 0.75:  # High confidence with large gap
+            is_illegal = True
+        elif max_score > 0.85:  # Very high confidence alone
+            is_illegal = True
+        else:
+            is_illegal = False  # Default: legal
         
         return {
             "is_illegal": is_illegal,
-            "illegal_product": None,
+            "illegal_product": illegal_product if is_illegal else None,
             "confidence": max_score,
             "confidence_gap": confidence_gap,
-            "all_scores": {}
+            "all_scores": {prod: probs[i].item() for i, prod in enumerate(self.illegal_products) if probs[i].item() > 0.60}
         }
     
     def check_watermark(self, image: Image.Image) -> Dict:
