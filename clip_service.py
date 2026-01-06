@@ -694,11 +694,11 @@ class CLIPService:
         """Check if image has website watermark (bikroy, daraz, etc.)"""
         # Specific watermark labels for BD e-commerce sites
         watermark_labels = [
-            "image with bikroy.com watermark",
-            "image with daraz watermark",
-            "image with website watermark overlay",
-            "image with store name watermark",
-            "clean product image without watermark"
+            "image with large bikroy text overlay watermark",
+            "image with bikroy.com transparent watermark",
+            "image with daraz text watermark overlay",
+            "image with marketplace website watermark",
+            "clean product photo without any watermark"
         ]
         
         inputs = self.processor(
@@ -718,19 +718,19 @@ class CLIPService:
         watermark_scores = probs[:4].max().item()
         max_watermark_idx = probs[:4].argmax().item()
         
-        # Has watermark if watermark score > clean score and confidence > 0.35
-        has_watermark = watermark_scores > clean_score and watermark_scores > 0.35
+        # More sensitive - detect watermark if score > 0.25 OR watermark_score > clean_score
+        has_watermark = watermark_scores > 0.25 or (watermark_scores > clean_score and watermark_scores > 0.20)
         
         watermark_type = None
         if has_watermark:
-            if max_watermark_idx == 0:
+            if max_watermark_idx == 0 or max_watermark_idx == 1:
                 watermark_type = "bikroy"
-            elif max_watermark_idx == 1:
-                watermark_type = "daraz"
             elif max_watermark_idx == 2:
+                watermark_type = "daraz"
+            elif max_watermark_idx == 3:
                 watermark_type = "website"
             else:
-                watermark_type = "store_name"
+                watermark_type = "marketplace"
         
         return {
             "has_watermark": has_watermark,
