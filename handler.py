@@ -130,23 +130,17 @@ def check_image_quality(image: Image.Image) -> Dict[str, Any]:
 
 
 def check_with_ocr(image: Image.Image, category: str) -> Dict[str, Any]:
-    """Step 2: OCR check"""
+    """Step 2: OCR check - only extract text"""
     global ocr_service
     try:
         result = ocr_service.extract_text(image)
         full_text = result.get("full_text", "")
-        analysis = result.get("analysis", {})
         
         return {
             "step": "ocr_check",
             "passed": len(full_text) > 0,
             "confidence": 0.5,
-            "image_extract": full_text[:200] if full_text else "No text detected",
-            "promotional_detected": analysis.get("is_promotional", False),
-            "promotional_score": analysis.get("promotional_score", 0),
-            "has_phone_number": analysis.get("has_phone_number", False),
-            "has_website_link": analysis.get("has_website_link", False),
-            "has_promotional_text": analysis.get("has_promotional_text", False)
+            "extracted_text": full_text
         }
     except Exception as e:
         return {
@@ -154,7 +148,7 @@ def check_with_ocr(image: Image.Image, category: str) -> Dict[str, Any]:
             "error": str(e),
             "passed": False,
             "confidence": 0.0,
-            "image_extract": ""
+            "extracted_text": ""
         }
 
 
