@@ -20,6 +20,7 @@ class OCRService:
     def extract_text(self, image: Image.Image) -> Dict:
         """
         Extract text from image using EasyOCR with rule-based detection
+        Includes preprocessing for faded/transparent watermarks
         
         Returns:
             Dict containing extracted text, watermark detection, and promotional detection
@@ -33,8 +34,32 @@ class OCRService:
         if len(img_array.shape) == 3 and img_array.shape[2] == 3:
             img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
         
-        # Perform OCR
+        # Create enhanced version for better watermark detection
+        # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        if len(img_array.shape) == 3:
+            lab = cv2.cvtColor(img_array, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+            l_enhanced = clahe.apply(l)
+            enhanced = cv2.merge([l_enhanced, a, b])
+            enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+        else:
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+            enhanced = clahe.apply(img_array)
+        
+        # Perform OCR on both original and enhanced images
         results = self.reader.readtext(img_array)
+        results_enhanced = self.reader.readtext(enhanced)
+        
+        # Combine results (deduplicate by text content)
+        all_results = results + results_enhanced
+        seen_texts = set()
+        unique_results = []
+        for result in all_results:
+            text = result[1].lower().strip()
+            if text not in seen_texts:
+                seen_texts.add(text)
+                unique_results.append(result)
         
         # Parse results
         extracted_data = []
@@ -42,7 +67,7 @@ class OCRService:
         word_list = []
         text_area = 0
         
-        for (bbox, text, confidence) in results:
+        for (bbox, text, confidence) in unique_results:
             extracted_data.append({
                 "text": text,
                 "confidence": float(confidence),
@@ -68,8 +93,14 @@ class OCRService:
             "bigstock", "fotolia", "canva", "pexels", "unsplash"
         ]
         
-        # Check for watermark keywords
+        # Bangladesh marketplace watermarks (HIGH PRIORITY)
+        bd_marketplace_keywords = ["bikroy", "daraz", "bikroy.com", "daraz.com.bd"]
+        
+        # Check for watermark keywords (case-insensitive)
         watermark_found = any(keyword in full_text_lower for keyword in watermark_keywords)
+        
+        # Check for BD marketplace watermarks (even partial match)
+        bd_watermark_found = any(keyword in full_text_lower for keyword in bd_marketplace_keywords)
         
         # Check for word repetition (stock photos repeat watermarks)
         from collections import Counter
@@ -82,12 +113,14 @@ class OCRService:
         
         # Watermark confidence (0.0 to 1.0)
         watermark_confidence = 0.0
-        if watermark_found:
-            watermark_confidence = 0.9  # Keyword match is strong evidence
+        if bd_watermark_found:
+            watermark_confidence = 0.95  # Bikroy/Daraz = definite watermark
+        elif watermark_found:
+            watermark_confidence = 0.9   # Other stock photo watermarks
         elif repetitive_watermark and text_coverage > 15:
-            watermark_confidence = 0.8  # Repeated text + high coverage
+            watermark_confidence = 0.8   # Repeated text + high coverage
         elif text_coverage > 30:
-            watermark_confidence = 0.6  # Very high text coverage suggests overlay
+            watermark_confidence = 0.6   # Very high text coverage suggests overlay
         
         # RULE-BASED PROMOTIONAL TEXT DETECTION
         promo_keywords = [
@@ -135,9 +168,10 @@ class OCRService:
             "full_text": full_text,
             "extracted_data": extracted_data,
             # Rule-based detection (HIGH CONFIDENCE)
-            "watermark_detected": watermark_found or repetitive_watermark,
+            "watermark_detected": watermark_found or repetitive_watermark or bd_watermark_found,
             "watermark_confidence": watermark_confidence,
-            "watermark_keywords_found": watermark_found,
+            "watermark_keywords_found": watermark_found or bd_watermark_found,
+            "bd_marketplace_watermark": bd_watermark_found,
             "repetitive_text": repetitive_watermark,
             "max_word_repetition": max_repetition,
             "text_coverage_percent": text_coverage,

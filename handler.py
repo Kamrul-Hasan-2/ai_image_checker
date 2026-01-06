@@ -252,11 +252,12 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         watermark_confidence_ocr = ocr_result.get("watermark_confidence", 0.0)
         promo_confidence_ocr = ocr_result.get("promotional_confidence", 0.0)
         watermark_keywords = ocr_result.get("watermark_keywords_found", False)
+        bd_marketplace = ocr_result.get("bd_marketplace_watermark", False)
         promo_keyword_count = ocr_result.get("promo_keyword_count", 0)
         seller_branding = ocr_result.get("seller_branding_detected", False)
         
         print(f"   OCR Risk: {ocr_risk:.2f} | Watermark: {watermark_confidence_ocr:.2f} | Promo: {promo_confidence_ocr:.2f}")
-        print(f"   Watermark Keywords: {watermark_keywords} | Promo Keywords: {promo_keyword_count} | Seller Branding: {seller_branding}")
+        print(f"   Watermark Keywords: {watermark_keywords} | BD Marketplace: {bd_marketplace} | Promo Keywords: {promo_keyword_count} | Seller Branding: {seller_branding}")
         
         # ========== STEP 3: CLIP (WEAK SIGNAL) ==========
         print("🎨 Step 3: CLIP Visual Analysis (WEAK SIGNAL)")
@@ -327,8 +328,9 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
             0.30 * qwen_watermark_score +                 # Qwen reasoning
             0.20 * watermark_confidence_clip              # CLIP weakest
         )
-        watermark_detected = watermark_risk > 0.5 or watermark_keywords
-        print(f"   Watermark Risk: {watermark_risk:.2f} (OCR: {watermark_confidence_ocr:.2f}, Qwen: {qwen_watermark_score:.2f}, CLIP: {watermark_confidence_clip:.2f})")
+        # HARD RULE: BD marketplace watermarks (bikroy/daraz) are definite
+        watermark_detected = watermark_risk > 0.5 or watermark_keywords or bd_marketplace
+        print(f"   Watermark Risk: {watermark_risk:.2f} (OCR: {watermark_confidence_ocr:.2f}, BD: {bd_marketplace}, Qwen: {qwen_watermark_score:.2f}, CLIP: {watermark_confidence_clip:.2f})")
         
         # PROMOTIONAL DETECTION (Weighted voting)
         promo_risk = (
