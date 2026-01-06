@@ -66,10 +66,10 @@ class QualityCheckService:
     
     def check_image(self, image: Image.Image, file_size: int = None) -> Dict:
         """
-        Comprehensive image quality check
+        Comprehensive image quality check with confidence scores
         
         Returns:
-            Dict with pass/fail status and reasons
+            Dict with pass/fail status, confidence scores, and reasons
         """
         checks = {
             "resolution": self._check_resolution(image),
@@ -79,16 +79,26 @@ class QualityCheckService:
             "screenshot_ui": self._check_screenshot_ui(image)
         }
         
+        # Extract confidence scores (0.0 to 1.0)
+        screenshot_confidence = checks["screenshot_ui"].get("confidence", 0.0)
+        blur_confidence = checks["blur"].get("confidence", 0.0)
+        
+        # Hard rule: OpenCV screenshot detection is FINAL
+        opencv_block = screenshot_confidence > 0.7
+        
         # Determine overall pass/fail
         failed_checks = [name for name, result in checks.items() if not result["passed"]]
-        passed = len(failed_checks) == 0
+        passed = len(failed_checks) == 0 and not opencv_block
         
         return {
             "passed": passed,
             "checks": checks,
             "failed_checks": failed_checks,
-            "action": "PASS" if passed else "BLOCK",
-            "reason": ", ".join(failed_checks) if failed_checks else "All quality checks passed"
+            "action": "BLOCK" if opencv_block else ("PASS" if passed else "BLOCK"),
+            "reason": "Screenshot detected by OpenCV" if opencv_block else (", ".join(failed_checks) if failed_checks else "All quality checks passed"),
+            "opencv_risk": screenshot_confidence * 0.7 + blur_confidence * 0.3,  # Weighted OpenCV risk
+            "screenshot_confidence": screenshot_confidence,
+            "blur_confidence": blur_confidence
         }
     
     def _check_resolution(self, image: Image.Image) -> Dict:

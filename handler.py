@@ -224,37 +224,149 @@ def check_with_qwen(image: Image.Image, category: str, image_url: Optional[str] 
 
 def process_single_image(image_input: str, category: str, pipeline_mode: str) -> Dict[str, Any]:
     """
-    Process a single image through the pipeline - Returns plain JSON format with severity scores
+    HYBRID VOTING SYSTEM: OpenCV > OCR > Qwen2-VL > CLIP
+    Priority order ensures hard rules override ML models
     """
     try:
         # Load image
         print(f"📸 Loading image for category: {category}")
         image = load_image(image_input)
         
-        # Step 1: Quality Check
-        print("🔍 Step 1: Quality Check")
-        quality_result = check_image_quality(image)
-        quality_details = quality_result.get("details", {})
+        # ========== STEP 1: OpenCV (HARD FILTER - HIGHEST PRIORITY) ==========
+        print("🔍 Step 1: OpenCV Quality Check (HARD FILTER)")
+        quality_result = quality_service.check_image(image)
+        opencv_risk = quality_result.get("opencv_risk", 0.0)
+        screenshot_confidence = quality_result.get("screenshot_confidence", 0.0)
+        blur_confidence = quality_result.get("blur_confidence", 0.0)
         
-        # Step 2: OCR Check
-        print("📝 Step 2: OCR Check")
-        ocr_result = check_with_ocr(image, category)
+        # HARD RULE: If OpenCV detects screenshot > 0.7, BLOCK immediately
+        opencv_screenshot_block = screenshot_confidence > 0.7
+        print(f"   OpenCV Risk: {opencv_risk:.2f} | Screenshot: {screenshot_confidence:.2f} | Blur: {blur_confidence:.2f}")
+        if opencv_screenshot_block:
+            print("   ⚠️ BLOCKED by OpenCV (screenshot detected)")
         
-        # Step 3: CLIP Check
-        print("🎨 Step 3: CLIP Check")
-        clip_result = check_with_clip(image, category)
-        clip_details = clip_result.get("details", {})
+        # ========== STEP 2: OCR (HARD EVIDENCE LAYER) ==========
+        print("📝 Step 2: OCR + Rule-Based Detection (HARD EVIDENCE)")
+        ocr_result = ocr_service.extract_text(image)
+        ocr_risk = ocr_result.get("ocr_risk", 0.0)
+        watermark_confidence_ocr = ocr_result.get("watermark_confidence", 0.0)
+        promo_confidence_ocr = ocr_result.get("promotional_confidence", 0.0)
+        watermark_keywords = ocr_result.get("watermark_keywords_found", False)
+        promo_keyword_count = ocr_result.get("promo_keyword_count", 0)
         
-        # Convert yes/no to severity scores
-        blur_detected = quality_details.get("blur_detection", "no") == "yes"
-        screenshot_detected = quality_details.get("screenshot_check", "no") == "yes"
-        promotional_detected = clip_details.get("has_promotional_text", "no") == "yes"
-        illegal_detected = clip_details.get("illegal_photo", "no") == "yes"
-        stock_photo_detected = clip_details.get("stock_photo", "no") == "yes"
-        watermark_detected = clip_details.get("has_watermark", False)
-        category_mismatch = False  # Disabled for now - needs proper category matching
+        print(f"   OCR Risk: {ocr_risk:.2f} | Watermark: {watermark_confidence_ocr:.2f} | Promo: {promo_confidence_ocr:.2f}")
+        print(f"   Watermark Keywords: {watermark_keywords} | Promo Keywords: {promo_keyword_count}")
         
-        # Build minimal response with only severity scores
+        # ========== STEP 3: CLIP (WEAK SIGNAL) ==========
+        print("🎨 Step 3: CLIP Visual Analysis (WEAK SIGNAL)")
+        clip_result = clip_service.analyze_image(image)
+        
+        risk_analysis = clip_result.get("risk_analysis", {})
+        promo_analysis = clip_result.get("promo_analysis", {})
+        illegal_check = clip_result.get("illegal_check", {})
+        watermark_check = clip_result.get("watermark_check", {})
+        
+        clip_risk = risk_analysis.get("weighted_risk_level", 0) / 100.0
+        promo_confidence_clip = promo_analysis.get("confidence", 0.0)
+        watermark_confidence_clip = watermark_check.get("confidence", 0.0)
+        illegal_confidence_clip = illegal_check.get("confidence", 0.0)
+        
+        print(f"   CLIP Risk: {clip_risk:.2f} | Promo: {promo_confidence_clip:.2f} | Watermark: {watermark_confidence_clip:.2f} | Illegal: {illegal_confidence_clip:.2f}")
+        
+        # ========== STEP 4: Qwen2-VL (REASONING MODEL) ==========
+        qwen_risk = 0.0
+        qwen_promo_score = 0.0
+        qwen_watermark_score = 0.0
+        qwen_illegal_score = 0.0
+        
+        # Only call Qwen if any model shows elevated risk
+        should_escalate = (
+            opencv_risk > 0.5 or 
+            ocr_risk > 0.5 or 
+            clip_risk > 0.55 or
+            illegal_confidence_clip > 0.7
+        )
+        
+        if should_escalate:
+            print("🤖 Step 4: Qwen2-VL Reasoning (ESCALATED)")
+            qwen_result = qwen2b_service.moderate_image(image)
+            qwen_decision = qwen_result.get("decision", "APPROVE").upper()
+            qwen_confidence = qwen_result.get("confidence", 0.0)
+            
+            # Convert Qwen decision to risk scores
+            if qwen_decision == "BLOCK":
+                qwen_risk = qwen_confidence
+            elif qwen_decision == "MANUAL_REVIEW":
+                qwen_risk = 0.5
+            else:
+                qwen_risk = 0.0
+            
+            # Parse reasoning for specific flags (simplified)
+            reasoning = qwen_result.get("reasoning", "").lower()
+            qwen_promo_score = 0.8 if "promotional" in reasoning or "advertisement" in reasoning else 0.0
+            qwen_watermark_score = 0.8 if "watermark" in reasoning or "logo" in reasoning else 0.0
+            qwen_illegal_score = 0.8 if "illegal" in reasoning or "weapon" in reasoning or "drug" in reasoning else 0.0
+            
+            print(f"   Qwen Decision: {qwen_decision} | Confidence: {qwen_confidence:.2f}")
+        else:
+            print("   Qwen2-VL SKIPPED (low risk)")
+        
+        # ========== HYBRID VOTING SYSTEM ==========
+        print("🗳️  Hybrid Voting System (Priority: OpenCV > OCR > Qwen > CLIP)")
+        
+        # SCREENSHOT DETECTION (OpenCV is FINAL)
+        screenshot_detected = opencv_screenshot_block
+        
+        # BLUR DETECTION (OpenCV only)
+        blur_detected = blur_confidence > 0.5
+        
+        # WATERMARK DETECTION (Weighted voting)
+        watermark_risk = (
+            0.50 * ocr_risk * watermark_confidence_ocr +  # OCR keywords = strongest
+            0.30 * qwen_watermark_score +                 # Qwen reasoning
+            0.20 * watermark_confidence_clip              # CLIP weakest
+        )
+        watermark_detected = watermark_risk > 0.5 or watermark_keywords
+        print(f"   Watermark Risk: {watermark_risk:.2f} (OCR: {watermark_confidence_ocr:.2f}, Qwen: {qwen_watermark_score:.2f}, CLIP: {watermark_confidence_clip:.2f})")
+        
+        # PROMOTIONAL DETECTION (Weighted voting)
+        promo_risk = (
+            0.50 * promo_confidence_ocr +      # OCR keywords = strongest
+            0.30 * qwen_promo_score +          # Qwen reasoning
+            0.20 * promo_confidence_clip       # CLIP weakest
+        )
+        promotional_detected = promo_risk > 0.5 or promo_keyword_count >= 3
+        print(f"   Promo Risk: {promo_risk:.2f} (OCR: {promo_confidence_ocr:.2f}, Qwen: {qwen_promo_score:.2f}, CLIP: {promo_confidence_clip:.2f})")
+        
+        # ILLEGAL DETECTION (Very strict - requires high Qwen + CLIP agreement)
+        illegal_risk = (
+            0.60 * qwen_illegal_score +        # Qwen reasoning most important
+            0.40 * illegal_confidence_clip     # CLIP backup
+        )
+        illegal_detected = illegal_risk > 0.8 or (qwen_illegal_score > 0.7 and illegal_confidence_clip > 0.9)
+        print(f"   Illegal Risk: {illegal_risk:.2f} (Qwen: {qwen_illegal_score:.2f}, CLIP: {illegal_confidence_clip:.2f})")
+        
+        # STOCK PHOTO DETECTION (CLIP only for now)
+        stock_photo_detected = False  # Disabled - needs specific implementation
+        
+        # CATEGORY MISMATCH (Disabled)
+        category_mismatch = False
+        
+        # FINAL RISK CALCULATION (Weighted formula)
+        final_risk = (
+            0.40 * ocr_risk +
+            0.35 * qwen_risk +
+            0.15 * clip_risk +
+            0.10 * opencv_risk
+        )
+        risk_level = int(final_risk * 100)
+        
+        print(f"📊 FINAL RISK: {risk_level}% (OCR: {ocr_risk:.2f}, Qwen: {qwen_risk:.2f}, CLIP: {clip_risk:.2f}, OpenCV: {opencv_risk:.2f})")
+        print(f"📋 DETECTION SUMMARY:")
+        print(f"   Screenshot: {screenshot_detected} | Blur: {blur_detected} | Watermark: {watermark_detected}")
+        print(f"   Promotional: {promotional_detected} | Illegal: {illegal_detected} | Stock: {stock_photo_detected}")
+        
+        # Build minimal response with only severity scores (SAME FORMAT)
         response = {
             "blur_image": 5 if blur_detected else 0,
             "screen_short": 8 if screenshot_detected else 0,
@@ -263,20 +375,15 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
             "promotional_text": 3 if promotional_detected else 0,
             "stock_photo": 10 if stock_photo_detected else 0,
             "watermark": 4 if watermark_detected else 0,
-            "risk_level": clip_details.get("risk_level", 0)
+            "risk_level": risk_level
         }
-        
-        # Step 4: Qwen2-VL if risk >= 85
-        risk_level = clip_details.get("risk_level", 0)
-        if risk_level >= 85:
-            print("🤖 Step 4: Qwen2-VL Check (High Risk)")
-            qwen_result = check_with_qwen(image, category, image_input if image_input.startswith('http') else None)
-            response["qwen_needs_moderation"] = not qwen_result.get("passed", False)
         
         return response
         
     except Exception as e:
         print(f"❌ Error processing image: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {
             "error": str(e),
             "blur_image": 0,

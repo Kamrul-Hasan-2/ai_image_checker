@@ -19,13 +19,15 @@ class OCRService:
     
     def extract_text(self, image: Image.Image) -> Dict:
         """
-        Extract text from image using EasyOCR
+        Extract text from image using EasyOCR with rule-based detection
         
         Returns:
-            Dict containing extracted text, bounding boxes, and confidence scores
+            Dict containing extracted text, watermark detection, and promotional detection
         """
         # Convert PIL Image to numpy array for OpenCV
         img_array = np.array(image)
+        img_height, img_width = img_array.shape[:2]
+        total_area = img_width * img_height
         
         # Convert RGB to BGR for OpenCV
         if len(img_array.shape) == 3 and img_array.shape[2] == 3:
@@ -37,6 +39,8 @@ class OCRService:
         # Parse results
         extracted_data = []
         all_text = []
+        word_list = []
+        text_area = 0
         
         for (bbox, text, confidence) in results:
             extracted_data.append({
@@ -45,15 +49,79 @@ class OCRService:
                 "bbox": bbox
             })
             all_text.append(text)
+            word_list.extend(text.lower().split())
+            
+            # Calculate text area
+            bbox_array = np.array(bbox)
+            width = np.max(bbox_array[:, 0]) - np.min(bbox_array[:, 0])
+            height = np.max(bbox_array[:, 1]) - np.min(bbox_array[:, 1])
+            text_area += width * height
         
         # Combine all text
         full_text = " ".join(all_text)
+        full_text_lower = full_text.lower()
+        
+        # RULE-BASED WATERMARK DETECTION (Hard Evidence)
+        watermark_keywords = [
+            "shutterstock", "getty", "istock", "preview", "sample", 
+            "watermark", "depositphotos", "alamy", "dreamstime",
+            "bigstock", "fotolia", "canva", "pexels", "unsplash"
+        ]
+        
+        # Check for watermark keywords
+        watermark_found = any(keyword in full_text_lower for keyword in watermark_keywords)
+        
+        # Check for word repetition (stock photos repeat watermarks)
+        from collections import Counter
+        word_counts = Counter(word_list)
+        max_repetition = max(word_counts.values()) if word_counts else 0
+        repetitive_watermark = max_repetition >= 3
+        
+        # Calculate text coverage percentage
+        text_coverage = (text_area / total_area) * 100 if total_area > 0 else 0
+        
+        # Watermark confidence (0.0 to 1.0)
+        watermark_confidence = 0.0
+        if watermark_found:
+            watermark_confidence = 0.9  # Keyword match is strong evidence
+        elif repetitive_watermark and text_coverage > 15:
+            watermark_confidence = 0.8  # Repeated text + high coverage
+        elif text_coverage > 30:
+            watermark_confidence = 0.6  # Very high text coverage suggests overlay
+        
+        # RULE-BASED PROMOTIONAL TEXT DETECTION
+        promo_keywords = [
+            "buy", "sale", "discount", "offer", "free", "limited",
+            "deal", "promo", "save", "off", "%", "tk", "taka",
+            "call", "contact", "whatsapp", "phone", "delivery"
+        ]
+        
+        # Count promotional keywords
+        promo_count = sum(1 for keyword in promo_keywords if keyword in full_text_lower)
+        promo_found = promo_count >= 2  # At least 2 promotional keywords
+        
+        # Promotional confidence (0.0 to 1.0)
+        promo_confidence = min(promo_count * 0.25, 1.0)  # Each keyword adds 0.25
+        
+        # OCR RISK SCORE (weighted)
+        ocr_risk = watermark_confidence * 0.6 + promo_confidence * 0.4
         
         return {
             "text_found": len(all_text) > 0,
             "text_count": len(all_text),
             "full_text": full_text,
-            "extracted_data": extracted_data
+            "extracted_data": extracted_data,
+            # Rule-based detection (HIGH CONFIDENCE)
+            "watermark_detected": watermark_found or repetitive_watermark,
+            "watermark_confidence": watermark_confidence,
+            "watermark_keywords_found": watermark_found,
+            "repetitive_text": repetitive_watermark,
+            "max_word_repetition": max_repetition,
+            "text_coverage_percent": text_coverage,
+            "promotional_detected": promo_found,
+            "promotional_confidence": promo_confidence,
+            "promo_keyword_count": promo_count,
+            "ocr_risk": ocr_risk  # 0.0 to 1.0
         }
     
 
