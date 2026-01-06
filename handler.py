@@ -161,6 +161,7 @@ def check_with_clip(image: Image.Image, category: str) -> Dict[str, Any]:
         promo_analysis = result.get("promo_analysis", {})
         category_analysis = result.get("category_analysis", {})
         illegal_check = result.get("illegal_check", {})
+        watermark_check = result.get("watermark_check", {})
         
         # Calculate risk level from weighted risk scoring
         risk_level = int(risk_analysis.get("weighted_risk_level", 0))
@@ -180,6 +181,8 @@ def check_with_clip(image: Image.Image, category: str) -> Dict[str, Any]:
                 "is_promotional": "yes" if promo_analysis.get("is_promotional", False) else "no",
                 "promotional_score": promo_analysis.get("promo_score", 0),
                 "stock_photo": "no",
+                "has_watermark": watermark_check.get("has_watermark", False),
+                "watermark_type": watermark_check.get("watermark_type"),
                 "illegal_photo": "yes" if illegal_check.get("is_illegal", False) else "no",
                 "illegal_confidence": illegal_check.get("confidence", 0),
                 "risk_level": risk_level,
@@ -248,7 +251,7 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         promotional_detected = clip_details.get("has_promotional_text", "no") == "yes"
         illegal_detected = clip_details.get("illegal_photo", "no") == "yes"
         stock_photo_detected = clip_details.get("stock_photo", "no") == "yes"
-        watermark_detected = False  # Add watermark detection if available
+        watermark_detected = clip_details.get("has_watermark", False)
         category_mismatch = False  # Disabled for now - needs proper category matching
         
         # Build minimal response with only severity scores
