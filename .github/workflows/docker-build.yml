@@ -28,6 +28,5 @@ jobs:
         context: .
         file: ./Dockerfile.serverless.light
         push: true
-        tags: kamrulhasan00/ai-image-checker:latest
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        tags: kamrulhasan00/ai-image-checker:latest,kamrulhasan00/ai-image-checker:v2.0
+        no-cache: true
