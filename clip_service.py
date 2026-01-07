@@ -1,8 +1,7 @@
 """
-CLIP Service for fast image analysis:
-- Category & risk scoring
-- Brand/logo similarity
-- Promo banner detection
+CLIP Service - v2.0 OPTIMIZED
+Visual analysis: illegal content, watermark, promotional detection
+Removed: category matching, brand comparison (unused in hybrid system)
 """
 
 import torch

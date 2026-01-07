@@ -1,6 +1,6 @@
 """
-RunPod Serverless Handler for AI Image Checker
-Integrates with quality, OCR, CLIP, and Qwen2-VL services
+RunPod Serverless Handler for AI Image Checker - v2.0 OPTIMIZED
+Hybrid voting system: OpenCV > OCR > Qwen2-VL > CLIP
 """
 
 import runpod
@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional
 import traceback
 import sys
 
-print("Starting handler import...", flush=True)
+print("Starting handler import... [v2.0 OPTIMIZED]", flush=True)
 
 try:
     from quality_service import QualityCheckService
