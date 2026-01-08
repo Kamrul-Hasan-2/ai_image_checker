@@ -257,6 +257,8 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         seller_branding = ocr_result.get("seller_branding_detected", False)
         
         print(f"   OCR Risk: {ocr_risk:.2f} | Watermark: {watermark_confidence_ocr:.2f} | Promo: {promo_confidence_ocr:.2f}")
+        extracted_text = ocr_result.get("full_text", "")[:100]  # First 100 chars
+        print(f"   OCR Extracted: '{extracted_text}'")
         print(f"   Watermark Keywords: {watermark_keywords} | BD Marketplace: {bd_marketplace} | Promo Keywords: {promo_keyword_count} | Seller Branding: {seller_branding}")
         
         # ========== STEP 3: CLIP (WEAK SIGNAL) ==========
@@ -329,8 +331,8 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
             0.20 * watermark_confidence_clip              # CLIP weakest
         )
         # HARD RULE: BD marketplace watermarks (bikroy/daraz) are definite
-        # Lower threshold from 0.5 to 0.3 for better detection
-        watermark_detected = watermark_risk > 0.3 or watermark_keywords or bd_marketplace
+        # Very low threshold (0.2) to catch more watermarks
+        watermark_detected = watermark_risk > 0.2 or watermark_keywords or bd_marketplace or watermark_confidence_ocr > 0.6
         print(f"   Watermark Risk: {watermark_risk:.2f} (OCR: {watermark_confidence_ocr:.2f}, BD: {bd_marketplace}, Qwen: {qwen_watermark_score:.2f}, CLIP: {watermark_confidence_clip:.2f})")
         
         # PROMOTIONAL DETECTION (Weighted voting)

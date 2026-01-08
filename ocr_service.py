@@ -47,17 +47,21 @@ class OCRService:
             clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
             enhanced = clahe.apply(img_array)
         
-        # Perform OCR on both original and enhanced images
+        # Additional gamma correction for very faded text
+        enhanced_gamma = cv2.convertScaleAbs(enhanced, alpha=1.5, beta=30)
+        
+        # Perform OCR on original, enhanced, and gamma-corrected images
         results = self.reader.readtext(img_array)
         results_enhanced = self.reader.readtext(enhanced)
+        results_gamma = self.reader.readtext(enhanced_gamma)
         
-        # Combine results (deduplicate by text content)
-        all_results = results + results_enhanced
+        # Combine results from all three passes (deduplicate by text content)
+        all_results = results + results_enhanced + results_gamma
         seen_texts = set()
         unique_results = []
         for result in all_results:
             text = result[1].lower().strip()
-            if text not in seen_texts:
+            if text not in seen_texts and len(text) > 0:
                 seen_texts.add(text)
                 unique_results.append(result)
         
@@ -94,13 +98,18 @@ class OCRService:
         ]
         
         # Bangladesh marketplace watermarks (HIGH PRIORITY)
-        bd_marketplace_keywords = ["bikroy", "daraz", "bikroy.com", "daraz.com.bd"]
+        bd_marketplace_keywords = ["bikroy", "daraz", "bikroy.com", "daraz.com.bd", "bik", "kroy"]
         
         # Check for watermark keywords (case-insensitive)
         watermark_found = any(keyword in full_text_lower for keyword in watermark_keywords)
         
         # Check for BD marketplace watermarks (even partial match)
         bd_watermark_found = any(keyword in full_text_lower for keyword in bd_marketplace_keywords)
+        
+        # Also check if "bikroy" can be formed from multiple words (e.g., "bik roy")
+        if not bd_watermark_found:
+            text_no_spaces = full_text_lower.replace(" ", "").replace("-", "")
+            bd_watermark_found = "bikroy" in text_no_spaces or "daraz" in text_no_spaces
         
         # Check for word repetition (stock photos repeat watermarks)
         from collections import Counter
@@ -114,13 +123,15 @@ class OCRService:
         # Watermark confidence (0.0 to 1.0)
         watermark_confidence = 0.0
         if bd_watermark_found:
-            watermark_confidence = 0.98  # Bikroy/Daraz = definite watermark (higher)
+            watermark_confidence = 0.99  # Bikroy/Daraz = definite watermark (maximum)
         elif watermark_found:
-            watermark_confidence = 0.9   # Other stock photo watermarks
-        elif repetitive_watermark and text_coverage > 10:
-            watermark_confidence = 0.85  # Repeated text + coverage (lowered threshold)
-        elif text_coverage > 20:
-            watermark_confidence = 0.7   # High text coverage suggests overlay (lowered)
+            watermark_confidence = 0.95  # Other stock photo watermarks (increased)
+        elif repetitive_watermark and text_coverage > 8:
+            watermark_confidence = 0.90  # Repeated text + coverage (lowered threshold more)
+        elif text_coverage > 15:
+            watermark_confidence = 0.75  # Medium text coverage suggests overlay (lowered)
+        elif len(all_text) > 5 and text_coverage > 10:
+            watermark_confidence = 0.65  # Many text elements suggest watermark
         
         # RULE-BASED PROMOTIONAL TEXT DETECTION
         promo_keywords = [
