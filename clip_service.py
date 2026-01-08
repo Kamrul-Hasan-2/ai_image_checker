@@ -92,8 +92,50 @@ class CLIPService:
         return regions
     
     def check_illegal_content(self, image: Image.Image) -> Dict:
-                "Computer  » PC & Laptop  » Used Laptop",
-                "Computer  » PC & Laptop  » PC Builder",
+        """Check if image contains illegal products with enhanced accuracy"""
+        # Convert image to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        inputs = self.processor(
+            text=self.illegal_products,
+            images=image,
+            return_tensors="pt",
+            padding=True
+        ).to(self.device)
+        
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            logits_per_image = outputs.logits_per_image / self.temperature
+            probs = logits_per_image.softmax(dim=1)[0]
+        
+        # Get top 3 scores for better accuracy
+        top3_values, top3_indices = torch.topk(probs, k=min(3, len(probs)))
+        max_score = top3_values[0].item()
+        max_idx = top3_indices[0].item()
+        illegal_product = self.illegal_products[max_idx]
+        
+        # Calculate confidence: check if top score is significantly higher than others
+        confidence_gap = max_score - top3_values[1].item() if len(top3_values) > 1 else max_score
+        is_confident = confidence_gap > 0.50  # Huge confidence gap required
+        
+        # Extremely rare - basically only for actual gun/adult photos
+        # All normal products return 0
+        if is_confident and max_score > 0.95:  # Near perfect with huge gap
+            is_illegal = True
+        else:
+            is_illegal = False  # Default: always legal (99.9% of cases)
+        
+        return {
+            "is_illegal": is_illegal,
+            "illegal_product": illegal_product if is_illegal else None,
+            "confidence": max_score,
+            "confidence_gap": confidence_gap,
+            "all_scores": {}
+        }
+    
+    def check_watermark(self, image: Image.Image) -> Dict:
+        """Check if image has website watermark using feature engineering"""
                 "Computer  » PC & Laptop  » Desktop PC",
                 "Computer  » PC & Laptop  » Mini PC",
                 "Computer  » PC & Laptop  » Graphics Tablet",
