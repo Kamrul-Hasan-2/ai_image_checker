@@ -39,24 +39,20 @@ class OCRService:
         if len(img_array.shape) == 3:
             lab = cv2.cvtColor(img_array, cv2.COLOR_BGR2LAB)
             l, a, b = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+            clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8,8))  # Slightly more aggressive
             l_enhanced = clahe.apply(l)
             enhanced = cv2.merge([l_enhanced, a, b])
             enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
         else:
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+            clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8,8))
             enhanced = clahe.apply(img_array)
         
-        # Additional gamma correction for very faded text
-        enhanced_gamma = cv2.convertScaleAbs(enhanced, alpha=1.5, beta=30)
-        
-        # Perform OCR on original, enhanced, and gamma-corrected images
+        # Perform OCR on original and enhanced images (2 passes only for speed)
         results = self.reader.readtext(img_array)
         results_enhanced = self.reader.readtext(enhanced)
-        results_gamma = self.reader.readtext(enhanced_gamma)
         
-        # Combine results from all three passes (deduplicate by text content)
-        all_results = results + results_enhanced + results_gamma
+        # Combine results from both passes (deduplicate by text content)
+        all_results = results + results_enhanced
         seen_texts = set()
         unique_results = []
         for result in all_results:

@@ -46,48 +46,24 @@ class CLIPService:
         ]
         
     def _preprocess_for_text_detection(self, image: Image.Image) -> List[Image.Image]:
-        """Generate multiple preprocessed versions to enhance text/watermark visibility"""
+        """Generate 2 preprocessed versions for faster processing"""
         preprocessed = []
-        
-        # Original
         preprocessed.append(image)
-        
-        # High contrast version (helps detect watermarks)
+        # High contrast for text/watermarks
         enhancer = ImageEnhance.Contrast(image)
         high_contrast = enhancer.enhance(2.0)
         preprocessed.append(high_contrast)
-        
-        # Sharpened version (enhances text edges)
-        sharpened = image.filter(ImageFilter.SHARPEN)
-        preprocessed.append(sharpened)
-        
-        # Brightness adjusted (helps with faded watermarks)
-        brightness = ImageEnhance.Brightness(image)
-        brightened = brightness.enhance(1.3)
-        preprocessed.append(brightened)
-        
         return preprocessed
     
     def _analyze_image_regions(self, image: Image.Image) -> List[Image.Image]:
-        """Split image into regions to detect watermarks in specific locations"""
+        """Analyze 2 key regions for faster processing"""
         regions = []
         width, height = image.size
-        
-        # Full image
         regions.append(image)
-        
-        # Bottom region (common watermark location)
+        # Bottom region (most common watermark location)
         bottom_region = image.crop((0, int(height * 0.7), width, height))
         regions.append(bottom_region)
-        
-        # Top region
-        top_region = image.crop((0, 0, width, int(height * 0.3)))
-        regions.append(top_region)
-        
-        # Center region
-        center_region = image.crop((int(width * 0.2), int(height * 0.3), 
-                                   int(width * 0.8), int(height * 0.7)))
-        regions.append(center_region)
+        return regions
         
         return regions
     

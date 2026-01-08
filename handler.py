@@ -232,9 +232,25 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         print(f"📸 Loading image for category: {category}")
         image = load_image(image_input)
         
+        # Resize large images for faster processing (max 1280px)
+        max_size = 1280
+        if max(image.size) > max_size:
+            ratio = max_size / max(image.size)
+            new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
+            image = image.resize(new_size, Image.Resampling.LANCZOS)
+            print(f"   Resized to {new_size[0]}x{new_size[1]} for speed")
+        
+        import time
+        total_start = time.time()
+        
+        import time
+        total_start = time.time()
+        
         # ========== STEP 1: OpenCV (HARD FILTER - HIGHEST PRIORITY) ==========
         print("🔍 Step 1: OpenCV Quality Check (HARD FILTER)")
+        step_start = time.time()
         quality_result = quality_service.check_image(image)
+        print(f"   ⏱️ Completed in {time.time() - step_start:.2f}s")
         opencv_risk = quality_result.get("opencv_risk", 0.0)
         screenshot_confidence = quality_result.get("screenshot_confidence", 0.0)
         blur_confidence = quality_result.get("blur_confidence", 0.0)
@@ -247,7 +263,9 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         
         # ========== STEP 2: OCR (HARD EVIDENCE LAYER) ==========
         print("📝 Step 2: OCR + Rule-Based Detection (HARD EVIDENCE)")
+        step_start = time.time()
         ocr_result = ocr_service.extract_text(image)
+        print(f"   ⏱️ OCR completed in {time.time() - step_start:.2f}s")
         ocr_risk = ocr_result.get("ocr_risk", 0.0)
         watermark_confidence_ocr = ocr_result.get("watermark_confidence", 0.0)
         promo_confidence_ocr = ocr_result.get("promotional_confidence", 0.0)
@@ -263,7 +281,9 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         
         # ========== STEP 3: CLIP (WEAK SIGNAL) ==========
         print("🎨 Step 3: CLIP Visual Analysis (WEAK SIGNAL)")
+        step_start = time.time()
         clip_result = clip_service.analyze_image(image)
+        print(f"   ⏱️ CLIP completed in {time.time() - step_start:.2f}s")
         
         risk_analysis = clip_result.get("risk_analysis", {})
         promo_analysis = clip_result.get("promo_analysis", {})
@@ -283,17 +303,19 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         qwen_watermark_score = 0.0
         qwen_illegal_score = 0.0
         
-        # Only call Qwen if any model shows elevated risk
+        # Only call Qwen if any model shows elevated risk (reduced calls for speed)
         should_escalate = (
-            opencv_risk > 0.5 or 
-            ocr_risk > 0.5 or 
-            clip_risk > 0.55 or
-            illegal_confidence_clip > 0.7
+            opencv_risk > 0.6 or 
+            ocr_risk > 0.65 or 
+            clip_risk > 0.65 or
+            illegal_confidence_clip > 0.8
         )
         
         if should_escalate:
             print("🤖 Step 4: Qwen2-VL Reasoning (ESCALATED)")
+            step_start = time.time()
             qwen_result = qwen2b_service.moderate_image(image)
+            print(f"   ⏱️ Qwen completed in {time.time() - step_start:.2f}s")
             qwen_decision = qwen_result.get("decision", "APPROVE").upper()
             qwen_confidence = qwen_result.get("confidence", 0.0)
             
@@ -373,6 +395,7 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         print(f"📋 DETECTION SUMMARY:")
         print(f"   Screenshot: {screenshot_detected} | Blur: {blur_detected} | Watermark: {watermark_detected}")
         print(f"   Promotional: {promotional_detected} | Illegal: {illegal_detected} | Stock: {stock_photo_detected}")
+        print(f"\n⏱️ TOTAL TIME: {time.time() - total_start:.2f}s")
         
         # Build minimal response with only severity scores (SAME FORMAT)
         response = {
