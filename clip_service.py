@@ -136,8 +136,12 @@ class CLIPService:
     
     def check_watermark(self, image: Image.Image) -> Dict:
         """Check if image has website watermark using feature engineering"""
-                "Computer  » PC & Laptop  » Desktop PC",
-                "Computer  » PC & Laptop  » Mini PC",
+        # Convert image to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Enhanced prompts focusing on visual features CLIP can see
+        watermark_labels = [
                 "Computer  » PC & Laptop  » Graphics Tablet",
                 "Computer  » PC & Laptop  » Signature Pad",
                 "Computer  » PC & Laptop  » Stylus Pen",
