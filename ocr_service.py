@@ -130,10 +130,37 @@ class OCRService:
             watermark_confidence = 0.65  # Many text elements suggest watermark
         
         # RULE-BASED PROMOTIONAL TEXT DETECTION
+        # Phone number patterns (English and Bengali digits)
+        import re
+        phone_patterns = [
+            r'\+?88[0-9]{11}',  # Bangladesh: +8801712345678
+            r'01[0-9]{9}',      # Mobile: 01712345678
+            r'[0-9]{3}[-.\\s_]?[0-9]{3,4}[-.\\s_]?[0-9]{2}[-.\\s_]?[0-9]{2}',  # With separators
+            r'০১[০-৯]{9}',      # Bengali digits: ০১৭১২৩৪৫৬৭৮
+            r'[০-৯]{11}',       # 11 Bengali digits
+        ]
+        has_phone_number = any(re.search(pattern, full_text) for pattern in phone_patterns)
+        
+        # Website/social media link patterns
+        link_keywords = [
+            "www.", ".com", ".net", ".org", ".bd", "http", "https",
+            "facebook.com", "fb.com", "fb.me", "instagram.com", "youtube.com",
+            "whatsapp", "telegram", "viber", "imo", "messenger"
+        ]
+        has_link = any(keyword in full_text_lower for keyword in link_keywords)
+        
         promo_keywords = [
-            "buy", "sale", "discount", "offer", "free", "limited",
-            "deal", "promo", "save", "off", "%", "tk", "taka",
-            "call", "contact", "whatsapp", "phone", "delivery"
+            # Sale/Purchase
+            "buy", "sale", "sell", "discount", "offer", "deal", "price", "tk", "taka",
+            "free", "shipping", "delivery", "order", "purchase", "limited", "hurry",
+            # Contact
+            "call", "contact", "visit", "whatsapp", "inbox", "dm", "message", "chat",
+            "phone", "mobile", "number", "reach", "connect",
+            # Authenticity claims
+            "original", "authentic", "genuine", "warranty", "guarantee", "certified",
+            "100%", "best", "top", "quality", "premium", "exclusive",
+            # Bengali common (transliterated)
+            "bikroy", "kena", "dam", "booking", "advance", "jomi", "land", "plot", "flat", "rent"
         ]
         
         # Seller/Business indicators (company names, house, store, shop, etc.)
@@ -159,7 +186,9 @@ class OCRService:
         
         # Promotional confidence (0.0 to 1.0)
         promo_confidence = 0.0
-        if is_seller_branding:
+        if has_phone_number or has_link:
+            promo_confidence = 0.95  # Phone/link = clear promotional intent
+        elif is_seller_branding:
             promo_confidence = 0.85  # Business name overlay is strong promotional signal (increased)
         elif promo_count >= 3:
             promo_confidence = 0.95  # Many promo keywords (increased)
@@ -184,10 +213,12 @@ class OCRService:
             "repetitive_text": repetitive_watermark,
             "max_word_repetition": max_repetition,
             "text_coverage_percent": text_coverage,
-            "promotional_detected": promo_found or is_seller_branding,
+            "promotional_detected": promo_found or is_seller_branding or has_phone_number or has_link,
             "promotional_confidence": promo_confidence,
             "promo_keyword_count": promo_count,
             "seller_branding_detected": is_seller_branding,
+            "has_phone_number": has_phone_number,
+            "has_link": has_link,
             "ocr_risk": ocr_risk  # 0.0 to 1.0
         }
     

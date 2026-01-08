@@ -273,11 +273,13 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
         bd_marketplace = ocr_result.get("bd_marketplace_watermark", False)
         promo_keyword_count = ocr_result.get("promo_keyword_count", 0)
         seller_branding = ocr_result.get("seller_branding_detected", False)
+        has_phone_number = ocr_result.get("has_phone_number", False)
+        has_link = ocr_result.get("has_link", False)
         
         print(f"   OCR Risk: {ocr_risk:.2f} | Watermark: {watermark_confidence_ocr:.2f} | Promo: {promo_confidence_ocr:.2f}")
         extracted_text = ocr_result.get("full_text", "")[:100]  # First 100 chars
         print(f"   OCR Extracted: '{extracted_text}'")
-        print(f"   Watermark Keywords: {watermark_keywords} | BD Marketplace: {bd_marketplace} | Promo Keywords: {promo_keyword_count} | Seller Branding: {seller_branding}")
+        print(f"   Watermark: {watermark_keywords} | BD: {bd_marketplace} | Promo: {promo_keyword_count} | Seller: {seller_branding} | Phone: {has_phone_number} | Link: {has_link}")
         
         # ========== STEP 3: CLIP (WEAK SIGNAL) ==========
         print("🎨 Step 3: CLIP Visual Analysis (WEAK SIGNAL)")
@@ -363,10 +365,10 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
             0.30 * qwen_promo_score +          # Qwen reasoning
             0.20 * promo_confidence_clip       # CLIP weakest
         )
-        # HARD RULE: Seller branding is promotional
+        # HARD RULE: Phone/link/seller branding = promotional
         # Lower threshold from 0.5 to 0.35 for better detection
-        promotional_detected = promo_risk > 0.35 or promo_keyword_count >= 2 or seller_branding
-        print(f"   Promo Risk: {promo_risk:.2f} (OCR: {promo_confidence_ocr:.2f}, Qwen: {qwen_promo_score:.2f}, CLIP: {promo_confidence_clip:.2f}, Seller: {seller_branding})")
+        promotional_detected = promo_risk > 0.35 or promo_keyword_count >= 2 or seller_branding or has_phone_number or has_link
+        print(f"   Promo Risk: {promo_risk:.2f} (OCR: {promo_confidence_ocr:.2f}, Qwen: {qwen_promo_score:.2f}, CLIP: {promo_confidence_clip:.2f}, Phone: {has_phone_number}, Link: {has_link})")
         
         # ILLEGAL DETECTION (Very strict - requires high Qwen + CLIP agreement)
         illegal_risk = (
