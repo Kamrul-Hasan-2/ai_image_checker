@@ -16,7 +16,7 @@ class QualityCheckService:
         self.max_resolution = 10000  # maximum width/height
         self.min_aspect_ratio = 0.2  # 1:5
         self.max_aspect_ratio = 5.0  # 5:1
-        self.blur_threshold = 100.0  # Laplacian variance threshold
+        self.blur_threshold = 150.0  # Laplacian variance threshold (stricter)
         self.min_filesize = 1024  # 1KB minimum
         
         print("Quality Check Service initialized")

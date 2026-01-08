@@ -114,13 +114,13 @@ class OCRService:
         # Watermark confidence (0.0 to 1.0)
         watermark_confidence = 0.0
         if bd_watermark_found:
-            watermark_confidence = 0.95  # Bikroy/Daraz = definite watermark
+            watermark_confidence = 0.98  # Bikroy/Daraz = definite watermark (higher)
         elif watermark_found:
             watermark_confidence = 0.9   # Other stock photo watermarks
-        elif repetitive_watermark and text_coverage > 15:
-            watermark_confidence = 0.8   # Repeated text + high coverage
-        elif text_coverage > 30:
-            watermark_confidence = 0.6   # Very high text coverage suggests overlay
+        elif repetitive_watermark and text_coverage > 10:
+            watermark_confidence = 0.85  # Repeated text + coverage (lowered threshold)
+        elif text_coverage > 20:
+            watermark_confidence = 0.7   # High text coverage suggests overlay (lowered)
         
         # RULE-BASED PROMOTIONAL TEXT DETECTION
         promo_keywords = [
@@ -134,15 +134,17 @@ class OCRService:
             "house", "store", "shop", "enterprise", "company", "limited",
             "ltd", "inc", "corp", "corporation", "business", "trading",
             "mart", "center", "centre", "suppliers", "solutions", "services",
-            "engineering", "technologies", "group", "international"
+            "engineering", "technologies", "group", "international",
+            "zone", "plaza", "market", "bazar", "outlet", "showroom"
         ]
         
-        # Check for seller/business names (e.g., "Desh Engineering House")
+        # Check for seller/business names (e.g., "Mobile Zone")
         words_in_text = full_text_lower.split()
         has_business_name = any(indicator in full_text_lower for indicator in business_indicators)
         
         # If text has business indicators + it's overlaid on image = promotional
-        is_seller_branding = has_business_name and len(words_in_text) >= 2 and len(words_in_text) <= 6
+        # More lenient: allow even single word + indicator (e.g., "MOBILE" + "ZONE")
+        is_seller_branding = has_business_name and len(words_in_text) >= 1 and len(words_in_text) <= 8
         
         # Count promotional keywords
         promo_count = sum(1 for keyword in promo_keywords if keyword in full_text_lower)
@@ -151,13 +153,13 @@ class OCRService:
         # Promotional confidence (0.0 to 1.0)
         promo_confidence = 0.0
         if is_seller_branding:
-            promo_confidence = 0.75  # Business name overlay is strong promotional signal
+            promo_confidence = 0.85  # Business name overlay is strong promotional signal (increased)
         elif promo_count >= 3:
-            promo_confidence = 0.9   # Many promo keywords
+            promo_confidence = 0.95  # Many promo keywords (increased)
         elif promo_count >= 2:
-            promo_confidence = 0.7
+            promo_confidence = 0.75  # 2 keywords (increased)
         elif promo_count == 1:
-            promo_confidence = 0.3
+            promo_confidence = 0.4   # Even 1 keyword is suspicious (increased)
         
         # OCR RISK SCORE (weighted)
         ocr_risk = watermark_confidence * 0.6 + promo_confidence * 0.4

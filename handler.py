@@ -329,7 +329,8 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
             0.20 * watermark_confidence_clip              # CLIP weakest
         )
         # HARD RULE: BD marketplace watermarks (bikroy/daraz) are definite
-        watermark_detected = watermark_risk > 0.5 or watermark_keywords or bd_marketplace
+        # Lower threshold from 0.5 to 0.3 for better detection
+        watermark_detected = watermark_risk > 0.3 or watermark_keywords or bd_marketplace
         print(f"   Watermark Risk: {watermark_risk:.2f} (OCR: {watermark_confidence_ocr:.2f}, BD: {bd_marketplace}, Qwen: {qwen_watermark_score:.2f}, CLIP: {watermark_confidence_clip:.2f})")
         
         # PROMOTIONAL DETECTION (Weighted voting)
@@ -339,7 +340,8 @@ def process_single_image(image_input: str, category: str, pipeline_mode: str) ->
             0.20 * promo_confidence_clip       # CLIP weakest
         )
         # HARD RULE: Seller branding is promotional
-        promotional_detected = promo_risk > 0.5 or promo_keyword_count >= 3 or seller_branding
+        # Lower threshold from 0.5 to 0.35 for better detection
+        promotional_detected = promo_risk > 0.35 or promo_keyword_count >= 2 or seller_branding
         print(f"   Promo Risk: {promo_risk:.2f} (OCR: {promo_confidence_ocr:.2f}, Qwen: {qwen_promo_score:.2f}, CLIP: {promo_confidence_clip:.2f}, Seller: {seller_branding})")
         
         # ILLEGAL DETECTION (Very strict - requires high Qwen + CLIP agreement)
