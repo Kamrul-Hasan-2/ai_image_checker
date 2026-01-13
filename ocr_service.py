@@ -50,32 +50,11 @@ class OCRService:
         if len(img_array.shape) == 3 and img_array.shape[2] == 3:
             img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
         
-        # Create enhanced version for better watermark detection
-        # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-        if len(img_array.shape) == 3:
-            lab = cv2.cvtColor(img_array, cv2.COLOR_BGR2LAB)
-            l, a, b = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8,8))  # Slightly more aggressive
-            l_enhanced = clahe.apply(l)
-            enhanced = cv2.merge([l_enhanced, a, b])
-            enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
-        else:
-            clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8,8))
-            enhanced = clahe.apply(img_array)
+        # SINGLE PASS ONLY for speed - no enhancement
+        results = self.reader.readtext(img_array, paragraph=False)
         
-        # Perform OCR on original and enhanced images (2 passes only for speed)
-        results = self.reader.readtext(img_array)
-        results_enhanced = self.reader.readtext(enhanced)
-        
-        # Combine results from both passes (deduplicate by text content)
-        all_results = results + results_enhanced
-        seen_texts = set()
-        unique_results = []
-        for result in all_results:
-            text = result[1].lower().strip()
-            if text not in seen_texts and len(text) > 0:
-                seen_texts.add(text)
-                unique_results.append(result)
+        # Use results as-is
+        unique_results = results
         
         # Parse results
         extracted_data = []
@@ -102,32 +81,23 @@ class OCRService:
         full_text = " ".join(all_text)
         full_text_lower = full_text.lower()
         
-        # RULE-BASED WATERMARK DETECTION (Hard Evidence)
+        # SIMPLIFIED WATERMARK DETECTION (fewer keywords for speed)
         watermark_keywords = [
-            "shutterstock", "getty", "istock", "preview", "sample", 
-            "watermark", "depositphotos", "alamy", "dreamstime",
-            "bigstock", "fotolia", "canva", "pexels", "unsplash"
+            "shutterstock", "getty", "istock", "watermark"
         ]
         
         # Bangladesh marketplace watermarks (HIGH PRIORITY)
-        bd_marketplace_keywords = ["bikroy", "daraz", "bikroy.com", "daraz.com.bd", "bik", "kroy"]
+        bd_marketplace_keywords = ["bikroy", "daraz"]
         
         # Check for watermark keywords (case-insensitive)
         watermark_found = any(keyword in full_text_lower for keyword in watermark_keywords)
         
-        # Check for BD marketplace watermarks (even partial match)
+        # Check for BD marketplace watermarks
         bd_watermark_found = any(keyword in full_text_lower for keyword in bd_marketplace_keywords)
         
-        # Also check if "bikroy" can be formed from multiple words (e.g., "bik roy")
-        if not bd_watermark_found:
-            text_no_spaces = full_text_lower.replace(" ", "").replace("-", "")
-            bd_watermark_found = "bikroy" in text_no_spaces or "daraz" in text_no_spaces
-        
-        # Check for word repetition (stock photos repeat watermarks)
-        from collections import Counter
-        word_counts = Counter(word_list)
-        max_repetition = max(word_counts.values()) if word_counts else 0
-        repetitive_watermark = max_repetition >= 3
+        # SKIP word repetition check for speed
+        max_repetition = 0
+        repetitive_watermark = False
         
         # Calculate text coverage percentage
         text_coverage = (text_area / total_area) * 100 if total_area > 0 else 0
@@ -135,10 +105,9 @@ class OCRService:
         # Watermark confidence (0.0 to 1.0)
         watermark_confidence = 0.0
         if bd_watermark_found:
-            watermark_confidence = 0.99  # Bikroy/Daraz = definite watermark (maximum)
+            watermark_confidence = 0.99  # Bikroy/Daraz = definite watermark
         elif watermark_found:
-            watermark_confidence = 0.95  # Other stock photo watermarks (increased)
-        elif repetitive_watermark and text_coverage > 8:
+            watermark_confidence = 0.95  # Other stock photo watermarks
             watermark_confidence = 0.90  # Repeated text + coverage (lowered threshold more)
         elif text_coverage > 15:
             watermark_confidence = 0.75  # Medium text coverage suggests overlay (lowered)

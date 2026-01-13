@@ -18,10 +18,6 @@ print("Starting Modal handler import... [v2.0 OPTIMIZED]", flush=True)
 # Create Modal app
 app = modal.App("ai-image-checker")
 
-# Create Volume for model caching (faster loading on subsequent runs)
-models_volume = modal.Volume.from_name("ai-models-cache", create_if_missing=True)
-MODELS_PATH = "/models"
-
 # Function to pre-download models during image build (GPU Snapshot)
 def download_models():
     """Download all models during image build to create a GPU-ready snapshot"""
@@ -89,12 +85,11 @@ image = (
     gpu="A10G",  # Nvidia A10G GPU
     cpu=8.0,
     memory=16384,
-    timeout=30,  # 30 second timeout - fast execution
+    timeout=30,  # 30 second timeout
     scaledown_window=15,  # 15 second cooldown before shutdown
     enable_memory_snapshot=True,  
     min_containers=0,  # SHUTS DOWN when not in use (Saves money)
     experimental_options={"enable_gpu_snapshot": True},
-    volumes={MODELS_PATH: models_volume}, 
 )
 @modal.concurrent(max_inputs=10)  
 class ImageChecker:
@@ -127,15 +122,6 @@ class ImageChecker:
         self.ocr_service = OCRService(languages=['en'])
         self.clip_service = CLIPService(model_name="openai/clip-vit-base-patch32")
         self.qwen2b_service = Qwen2VLService(model_name="Qwen/Qwen2-VL-2B-Instruct")
-        
-        # 3. Quick GPU warmup
-        from PIL import Image
-        dummy_img = Image.new('RGB', (224, 224), color='black')
-        with torch.no_grad():
-            try:
-                self.clip_service.analyze_image(dummy_img)
-            except:
-                pass
     
     def load_image(self, image_input: str) -> Image.Image:
         """Load image from URL or base64 string"""
@@ -151,7 +137,7 @@ class ImageChecker:
                     'Connection': 'keep-alive',
                     'Referer': image_input.split('/')[0] + '//' + image_input.split('/')[2] + '/',
                 }
-                response = requests.get(image_input, headers=headers, timeout=5)
+                response = requests.get(image_input, headers=headers, timeout=2)
                 response.raise_for_status()
                 image = Image.open(io.BytesIO(response.content))
             # Check if it's base64
@@ -178,8 +164,8 @@ class ImageChecker:
             # Load image
             image = self.load_image(image_input)
             
-            # Resize large images for faster processing (max 800px for speed)
-            max_size = 800
+            # Resize to 192px for speed and accuracy balance
+            max_size = 192
             if max(image.size) > max_size:
                 ratio = max_size / max(image.size)
                 new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
@@ -204,30 +190,22 @@ class ImageChecker:
             has_phone_number = ocr_result.get("has_phone_number", False)
             has_link = ocr_result.get("has_link", False)
             
-            # ========== STEP 3: CLIP (WEAK SIGNAL) ==========
-            clip_result = self.clip_service.analyze_image(image)
-            risk_analysis = clip_result.get("risk_analysis", {})
-            promo_analysis = clip_result.get("promo_analysis", {})
-            illegal_check = clip_result.get("illegal_check", {})
-            watermark_check = clip_result.get("watermark_check", {})
+            # SKIP CLIP ENTIRELY - only use OpenCV + OCR for maximum speed
+            clip_risk = 0.0
+            promo_confidence_clip = 0.0
+            watermark_confidence_clip = 0.0
+            illegal_confidence_clip = 0.0
             
-            clip_risk = risk_analysis.get("weighted_risk_level", 0) / 100.0
-            promo_confidence_clip = promo_analysis.get("confidence", 0.0)
-            watermark_confidence_clip = watermark_check.get("confidence", 0.0)
-            illegal_confidence_clip = illegal_check.get("confidence", 0.0)
-            
-            # ========== STEP 4: Qwen2-VL (REASONING MODEL) ==========
+            # ========== STEP 4: Qwen2-VL (ONLY FOR HIGH RISK) ==========
             qwen_risk = 0.0
             qwen_promo_score = 0.0
             qwen_watermark_score = 0.0
             qwen_illegal_score = 0.0
             
-            # Only call Qwen if any model shows elevated risk
+            # Make Qwen EXTREMELY rare to trigger (almost never)
             should_escalate = (
-                opencv_risk > 0.6 or 
-                ocr_risk > 0.65 or 
-                clip_risk > 0.65 or
-                illegal_confidence_clip > 0.8
+                opencv_risk > 0.9 or 
+                ocr_risk > 0.9
             )
             
             if should_escalate:
@@ -249,35 +227,21 @@ class ImageChecker:
             screenshot_detected = opencv_screenshot_block
             blur_detected = blur_confidence > 0.5
             
-            watermark_risk = (
-                0.50 * ocr_risk * watermark_confidence_ocr +
-                0.30 * qwen_watermark_score +
-                0.20 * watermark_confidence_clip
-            )
+            # Simplified scoring - no CLIP
+            watermark_risk = ocr_risk * watermark_confidence_ocr + 0.2 * qwen_watermark_score
             watermark_detected = watermark_risk > 0.2 or watermark_keywords or bd_marketplace or watermark_confidence_ocr > 0.6
             
-            promo_risk = (
-                0.50 * promo_confidence_ocr +
-                0.30 * qwen_promo_score +
-                0.20 * promo_confidence_clip
-            )
+            promo_risk = promo_confidence_ocr + 0.2 * qwen_promo_score
             promotional_detected = promo_risk > 0.35 or promo_keyword_count >= 2 or seller_branding or has_phone_number or has_link
             
-            illegal_risk = (
-                0.60 * qwen_illegal_score +
-                0.40 * illegal_confidence_clip
-            )
-            illegal_detected = illegal_risk > 0.8 or (qwen_illegal_score > 0.7 and illegal_confidence_clip > 0.9)
+            illegal_risk = qwen_illegal_score
+            illegal_detected = illegal_risk > 0.8
             
             stock_photo_detected = False
             category_mismatch = False
             
-            final_risk = (
-                0.40 * ocr_risk +
-                0.35 * qwen_risk +
-                0.15 * clip_risk +
-                0.10 * opencv_risk
-            )
+            # 70% OCR, 20% Qwen (rarely used), 10% OpenCV
+            final_risk = 0.70 * ocr_risk + 0.20 * qwen_risk + 0.10 * opencv_risk
             risk_level = int(final_risk * 100)
             
             # Build minimal response
@@ -320,15 +284,15 @@ class ImageChecker:
                 if not images_list:
                     return {"error": "No images provided. Please provide 'images' array."}
                 
-                results = []
+                # PARALLEL PROCESSING for speed
+                from concurrent.futures import ThreadPoolExecutor, as_completed
                 
-                # Process each image
-                for img_data in images_list:
+                def process_wrapper(img_data):
                     image_input = img_data.get("image")
                     category = img_data.get("category", "unknown")
                     
                     if not image_input:
-                        results.append({
+                        return {
                             "error": "No image URL provided",
                             "blur_image": 0,
                             "screen_short": 0,
@@ -338,11 +302,14 @@ class ImageChecker:
                             "stock_photo": 0,
                             "watermark": 0,
                             "risk_level": 0
-                        })
-                        continue
+                        }
                     
-                    result = self.process_single_image(image_input, category, pipeline_mode)
-                    results.append(result)
+                    return self.process_single_image(image_input, category, pipeline_mode)
+                
+                # Process images in parallel (max 2 threads to avoid contention)
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = [executor.submit(process_wrapper, img_data) for img_data in images_list]
+                    results = [future.result() for future in futures]
                 
                 return results
             
@@ -370,7 +337,7 @@ class ImageChecker:
     gpu="A10G",  # GPU for web endpoint
     cpu=4.0,
     memory=16384,
-    timeout=30,  # 30 second timeout for fast execution
+    timeout=30,  # 30 second timeout
     scaledown_window=15,  # 15 second cooldown before shutdown
     enable_memory_snapshot=True,
     min_containers=0,

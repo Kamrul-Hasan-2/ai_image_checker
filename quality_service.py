@@ -96,7 +96,7 @@ class QualityCheckService:
             "failed_checks": failed_checks,
             "action": "BLOCK" if opencv_block else ("PASS" if passed else "BLOCK"),
             "reason": "Screenshot detected by OpenCV" if opencv_block else (", ".join(failed_checks) if failed_checks else "All quality checks passed"),
-            "opencv_risk": screenshot_confidence * 0.7 + blur_confidence * 0.3,  # Weighted OpenCV risk
+            "opencv_risk": screenshot_confidence * 0.7 + blur_confidence * 0.3,
             "screenshot_confidence": screenshot_confidence,
             "blur_confidence": blur_confidence
         }
