@@ -11,10 +11,26 @@ from typing import Dict, List, Tuple
 
 
 class OCRService:
-    def __init__(self, languages: List[str] = ['en']):
-        """Initialize EasyOCR reader"""
+    def __init__(self, languages: List[str] = ['en'], model_storage_directory: str = None):
+        """Initialize EasyOCR reader with optional model storage directory"""
         print(f"Loading EasyOCR model for languages: {languages}")
-        self.reader = easyocr.Reader(languages, gpu=True)
+        
+        if model_storage_directory:
+            print(f"Using cached models from: {model_storage_directory}")
+            self.reader = easyocr.Reader(
+                languages,
+                gpu=True,
+                model_storage_directory=model_storage_directory,
+                download_enabled=False
+            )
+        else:
+            self.reader = easyocr.Reader(
+                languages,
+                gpu=True,
+                model_storage_directory='/root/.cache/easyocr',
+                download_enabled=True
+            )
+        
         print("EasyOCR model loaded successfully")
     
     def extract_text(self, image: Image.Image) -> Dict:

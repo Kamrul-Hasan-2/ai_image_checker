@@ -17,9 +17,9 @@ class CLIPService:
         """Initialize CLIP model and processor"""
         print(f"Loading CLIP model: {model_name}")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = CLIPModel.from_pretrained(model_name).to(self.device)
+        self.model = CLIPModel.from_pretrained(model_name, local_files_only=True).to(self.device)
         self.model.eval()  # Set to evaluation mode for better inference
-        self.processor = CLIPProcessor.from_pretrained(model_name)
+        self.processor = CLIPProcessor.from_pretrained(model_name, local_files_only=True)
         print(f"CLIP model loaded on {self.device}")
         
         # Temperature scaling for better calibration

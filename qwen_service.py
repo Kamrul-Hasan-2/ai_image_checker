@@ -21,8 +21,8 @@ class Qwen2VLService:
         # Load model with appropriate settings
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_name,
-            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-            device_map="auto" if self.device == "cuda" else None,
+            torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
+            device_map="cuda" if self.device == "cuda" else None,
             trust_remote_code=True
         )
         
