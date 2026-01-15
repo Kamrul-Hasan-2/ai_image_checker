@@ -1,11 +1,25 @@
-fastapi
-uvicorn[standard]
-python-multipart
-transformers
-Pillow
-qwen-vl-utils
-accelerate
-sentencepiece
-easyocr
-opencv-python-headless
-requests
+# Core FastAPI and Web Framework
+fastapi==0.115.6
+uvicorn==0.34.0
+pydantic==2.10.6
+python-multipart==0.0.20
+
+# HTTP Requests
+requests==2.32.3
+
+# Image Processing
+Pillow==11.1.0
+opencv-python-headless==4.11.0.86
+numpy==2.3.5
+
+# OCR
+easyocr==1.7.2
+
+# AI/ML Models
+torch==2.6.0
+transformers==4.48.2
+qwen-vl-utils==0.0.8
+
+# Optional (uncomment if needed for specific deployments)
+# modal==0.71.21
+# runpod==1.7.9
