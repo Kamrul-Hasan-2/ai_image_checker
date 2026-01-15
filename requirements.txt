@@ -10,13 +10,15 @@ requests==2.32.3
 # Image Processing
 Pillow==11.1.0
 opencv-python-headless==4.11.0.86
-numpy==2.3.5
+numpy>=2.0,<2.3.0
 
 # OCR
 easyocr==1.7.2
 
 # AI/ML Models
-torch==2.6.0
+torch==2.9.1
+torchvision==0.24.1
+torchaudio==2.9.1
 transformers==4.48.2
 qwen-vl-utils==0.0.8
 
