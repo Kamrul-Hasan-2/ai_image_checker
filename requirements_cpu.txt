@@ -1,0 +1,24 @@
+# CPU-Only Requirements (Much Smaller - No CUDA)
+# Use this for deployment on servers without GPU
+
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-multipart==0.0.12
+pillow==10.4.0
+numpy==1.26.4
+requests==2.32.3
+pydantic==2.9.2
+
+# AI Models - CPU versions
+torch==2.4.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+torchvision==0.19.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+transformers==4.45.1
+accelerate==0.34.2
+
+# Image processing
+opencv-python-headless==4.10.0.84
+pytesseract==0.3.13
+
+# Optional - only if you need specific features
+# sentence-transformers==3.1.1
+# qwen-vl-utils==0.0.8
