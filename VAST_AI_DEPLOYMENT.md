@@ -1,99 +1,147 @@
 # Vast.ai Deployment Guide
 
-## ✅ What You Have
+## ⚠️ Important: Don't Use Docker on Vast.ai!
 
-- **Running Vast.ai instance**: `120.238.149.205:25752`
-- **Port exposed**: 8000 (needs to be public)
-- **API configured**: ✅ Already listening on `0.0.0.0:8000`
+Vast.ai instances already run inside containers. You should run your application **directly** without Docker.
 
 ---
 
-## 🔹 Step 1: Verify API is Listening on 0.0.0.0 ✅
+## 🚀 Quick Setup (3 Steps)
 
-Your `main.py` is already configured correctly:
+### Step 1: SSH into your Vast.ai instance
 
-```python
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+```bash
+ssh -p YOUR_PORT root@YOUR_VAST_IP
 ```
 
-✅ **This is correct** - will accept connections from anywhere
+### Step 2: Download and run setup script
+
+```bash
+# Navigate to workspace
+cd /workspace
+
+# Clone or upload your code
+# (You can use scp, git, or Vast.ai's file upload)
+
+# Run setup
+cd ai_image_checker
+bash setup_vast_ai.sh
+```
+
+### Step 3: Start the service
+
+```bash
+bash start_vast_ai.sh
+```
+
+Or run in background with screen:
+```bash
+screen -S api
+bash start_vast_ai.sh
+# Press Ctrl+A then D to detach
+# Reconnect with: screen -r api
+```
 
 ---
 
-## 🔹 Step 2: Expose Port 8000 in Vast.ai
+## 📋 Manual Setup Instructions
+
+If you prefer manual setup or the script doesn't work:
+
+### 1. Install System Dependencies
+
+```bash
+apt-get update
+apt-get install -y python3-pip python3-venv libgl1-mesa-glx libglib2.0-0 screen
+```
+
+### 2. Setup Python Environment
+
+```bash
+cd /workspace/ai_image_checker
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+```
+
+### 3. Install PyTorch (GPU)
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+### 4. Install Application Dependencies
+
+```bash
+pip install fastapi uvicorn pydantic python-multipart requests Pillow opencv-python-headless numpy easyocr transformers qwen-vl-utils
+```
+
+### 5. Start the Service
+
+```bash
+python3 main.py
+```
+
+---
+
+## 🌐 Port Configuration
 
 ### In Vast.ai Dashboard:
 
 1. Go to your instance details
-2. Look for **Port Mappings** section
-3. Make sure port 8000 is **publicly exposed**:
-   - **Internal Port**: 8000
-   - **External Port**: 8000 (or mapped port)
-   - **Protocol**: TCP
-   - **Public**: ✅ Enabled
+2. Click **"Edit"** on your instance
+3. Under **Port Mappings**, ensure port 8000 is exposed:
+   - **Container Port**: 8000
+   - **Make it public**: ✅ Checked
 
-### If Using Docker:
+### Find Your Public URL:
 
-```bash
-docker run --gpus all -p 8000:8000 -v /opt/ai_image_checker:/app your-image
+Your API will be available at:
 ```
+http://YOUR_VAST_PUBLIC_IP:MAPPED_PORT
+```
+
+Check the Vast.ai dashboard for the exact port mapping.
 
 ---
 
-## 🔹 Step 3: Find Your Vast.ai Public IP and Port
+## 🔍 Troubleshooting
 
-You already have:
-- **Public IP**: `120.238.149.205`
-- **SSH Port**: `25752`
-- **API Port**: Check Vast.ai dashboard for the mapped port for 8000
-
-Your public URL will be:
-```
-http://120.238.149.205:<MAPPED_PORT>
-```
-
-Or if port 8000 is directly exposed:
-```
-http://120.238.149.205:8000
-```
-
----
-
-## 🔹 Step 4: Start Your Service on Vast.ai
-
-### SSH into your Vast instance:
-
-```powershell
-ssh -i "C:\Users\BLG\Documents\ssh-key-ai\id_ed25519" -p 25752 root@120.238.149.205
-```
-
-### Option A: Run with Screen (Recommended)
+### Service won't start?
 
 ```bash
-# Install screen if needed
-apt install screen -y
+# Check if port 8000 is already in use
+lsof -i :8000
+netstat -tulpn | grep 8000
 
-# Start a screen session
-screen -S api-service
-
-# Navigate and activate
-cd /opt/ai_image_checker
-source venv/bin/activate
-
-# Start the service
-python3 main.py
-
-# Detach: Press Ctrl+A then D
-# Reattach later: screen -r api-service
+# Kill existing process if needed
+kill -9 $(lsof -t -i:8000)
 ```
 
-### Option B: Run with nohup
+### Can't connect from outside?
+
+1. Verify port 8000 is exposed in Vast.ai dashboard
+2. Check firewall rules: `iptables -L`
+3. Verify service is listening: `netstat -tulpn | grep 8000`
+4. Test locally first: `curl http://localhost:8000/health`
+
+### Out of memory?
 
 ```bash
-cd /opt/ai_image_checker
-source venv/bin/activate
-nohup python3 main.py > /var/log/api.log 2>&1 &
+# Check memory usage
+free -h
+
+# Choose a Vast.ai instance with more RAM (16GB+ recommended)
+```
+
+### GPU not detected?
+
+```bash
+# Check GPU availability
+nvidia-smi
+
+# Verify PyTorch can see GPU
+python3 -c "import torch; print(torch.cuda.is_available())"
 ```
 
 ---
