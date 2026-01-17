@@ -79,11 +79,24 @@ async def startup_event():
 
 @app.get("/")
 async def root():
+    """Root endpoint - API Information"""
     return {
-        "status": "healthy",
+        "service": "AI Image Checker API",
+        "status": "running",
         "version": "3.0.0",
         "pipeline": "Quality → OCR → CLIP → Qwen2B (7B disabled)",
-        "thresholds": {"clip": 0.70, "qwen2b": 0.85}
+        "endpoints": {
+            "docs": "/docs",
+            "health": "/health",
+            "check_image": "POST /check_image (upload file)",
+            "check_image_url": "POST /check_image_url (provide URL)",
+            "dispute": "POST /dispute",
+            "quality": "POST /quality",
+            "ocr": "POST /ocr",
+            "clip_category": "POST /clip/category",
+            "clip_risk": "POST /clip/risk"
+        },
+        "message": "Visit /docs for interactive API documentation"
     }
 
 

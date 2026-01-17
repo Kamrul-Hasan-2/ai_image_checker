@@ -1,0 +1,234 @@
+{
+  "info": {
+    "name": "Vast.ai AI Image Checker API",
+    "_postman_id": "12345-67890-abcde",
+    "description": "Complete API collection for AI Image Checker running on Vast.ai",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://120.238.149.205:8000",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": ["{{base_url}}"],
+          "path": ["health"]
+        },
+        "description": "Check if the API service is running and which services are available."
+      },
+      "response": []
+    },
+    {
+      "name": "2. Check Image (File Upload)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": [],
+              "description": "Select an image file to check"
+            },
+            {
+              "key": "category",
+              "value": "electronics",
+              "type": "text",
+              "description": "Optional: electronics, fashion, food, etc."
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{base_url}}/check_image",
+          "host": ["{{base_url}}"],
+          "path": ["check_image"]
+        },
+        "description": "Upload an image file and get AI moderation results through the 5-step pipeline."
+      },
+      "response": []
+    },
+    {
+      "name": "3. Check Image (URL)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"image_url\": \"https://example.com/image.jpg\",\n    \"category\": \"electronics\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{base_url}}/check_image_url",
+          "host": ["{{base_url}}"],
+          "path": ["check_image_url"]
+        },
+        "description": "Check an image by providing its URL instead of uploading."
+      },
+      "response": []
+    },
+    {
+      "name": "4. Dispute Resolution",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": []
+            },
+            {
+              "key": "decision",
+              "value": "REJECT",
+              "type": "text",
+              "description": "Original decision: APPROVE or REJECT"
+            },
+            {
+              "key": "reason",
+              "value": "Contains inappropriate content",
+              "type": "text",
+              "description": "Reason for the original decision"
+            },
+            {
+              "key": "context",
+              "value": "User disagrees with moderation decision",
+              "type": "text",
+              "description": "Additional context for dispute"
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{base_url}}/dispute",
+          "host": ["{{base_url}}"],
+          "path": ["dispute"]
+        },
+        "description": "Submit a dispute for manual review using the Qwen2-VL model."
+      },
+      "response": []
+    },
+    {
+      "name": "5. CLIP Category Score",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": []
+            },
+            {
+              "key": "category",
+              "value": "electronics",
+              "type": "text"
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{base_url}}/clip/category",
+          "host": ["{{base_url}}"],
+          "path": ["clip", "category"]
+        },
+        "description": "Get CLIP similarity score for a specific category."
+      },
+      "response": []
+    },
+    {
+      "name": "6. CLIP Risk Assessment",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": []
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{base_url}}/clip/risk",
+          "host": ["{{base_url}}"],
+          "path": ["clip", "risk"]
+        },
+        "description": "Check if image contains risky or inappropriate content using CLIP."
+      },
+      "response": []
+    },
+    {
+      "name": "7. Quality Check",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": []
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{base_url}}/quality",
+          "host": ["{{base_url}}"],
+          "path": ["quality"]
+        },
+        "description": "Check image quality (blur, brightness, size)."
+      },
+      "response": []
+    },
+    {
+      "name": "8. OCR Text Detection",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": []
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{base_url}}/ocr",
+          "host": ["{{base_url}}"],
+          "path": ["ocr"]
+        },
+        "description": "Extract text from image using OCR (Tesseract)."
+      },
+      "response": []
+    }
+  ]
+}
