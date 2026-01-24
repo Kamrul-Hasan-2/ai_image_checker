@@ -45,6 +45,14 @@ class CLIPService:
             "violent or graphic content"
         ]
         
+        # AI-generated image indicators
+        self.ai_indicators = [
+            "real photograph taken with camera",
+            "AI generated synthetic digital art image",
+            "computer generated CGI artificial image",
+            "photorealistic real world photograph"
+        ]
+        
     def _preprocess_for_text_detection(self, image: Image.Image) -> List[Image.Image]:
         """Generate 2 preprocessed versions for faster processing"""
         preprocessed = []
@@ -864,6 +872,54 @@ class CLIPService:
             "detection_count": detection_count
         }
     
+    def check_ai_generated(self, image: Image.Image) -> Dict:
+        """
+        Check if image is AI-generated using CLIP
+        This is a preliminary check - Qwen2-VL does more detailed analysis
+        """
+        # Convert image to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        inputs = self.processor(
+            text=self.ai_indicators,
+            images=image,
+            return_tensors="pt",
+            padding=True
+        ).to(self.device)
+        
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            logits_per_image = outputs.logits_per_image / self.temperature
+            probs = logits_per_image.softmax(dim=1)[0]
+        
+        # Scores for each indicator
+        real_photo_score = probs[0].item()
+        ai_generated_score = probs[1].item()
+        cgi_score = probs[2].item()
+        photorealistic_score = probs[3].item()
+        
+        # Combine AI indicators
+        total_ai_score = ai_generated_score + cgi_score
+        total_real_score = real_photo_score + photorealistic_score
+        
+        # Determine if likely AI-generated
+        # Conservative threshold: only flag if strong AI indicators
+        is_ai_generated = (
+            total_ai_score > total_real_score and
+            total_ai_score > 0.45  # Require high confidence
+        )
+        
+        return {
+            "is_ai_generated": is_ai_generated,
+            "ai_confidence": total_ai_score,
+            "real_confidence": total_real_score,
+            "ai_score": ai_generated_score,
+            "cgi_score": cgi_score,
+            "real_photo_score": real_photo_score,
+            "requires_qwen_review": total_ai_score > 0.30  # Lower threshold for escalation
+        }
+    
     def analyze_image(self, image: Image.Image) -> Dict:
         """Comprehensive image analysis using CLIP - OPTIMIZED"""
         risk_scores = self.get_risk_scores(image)
@@ -873,7 +929,8 @@ class CLIPService:
             "risk_analysis": risk_scores,
             "promo_analysis": promo_scores,
             "illegal_check": self.check_illegal_content(image),
-            "watermark_check": self.check_watermark(image)
+            "watermark_check": self.check_watermark(image),
+            "ai_check": self.check_ai_generated(image)
         }
     
     def get_risk_scores(self, image: Image.Image) -> Dict:
@@ -935,6 +992,51 @@ class CLIPService:
             "action": "ESCALATE_TO_QWEN2B" if requires_escalation else "APPROVE"
         }
     
+    def detect_product_photo(self, image: Image.Image) -> Dict:
+        """Detect if image shows an actual product (not promotional banner)"""
+        # Convert image to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Labels to identify product photos vs promotional content
+        product_labels = [
+            "clean product photography on white background",
+            "product photo in packaging box",
+            "professional product image without text overlay",
+            "product displayed on shelf or table",
+            "e-commerce product listing photo",
+            "promotional advertisement banner with text",
+            "marketing poster with contact information",
+            "advertisement flyer with sale offers"
+        ]
+        
+        inputs = self.processor(
+            text=product_labels,
+            images=image,
+            return_tensors="pt",
+            padding=True
+        ).to(self.device)
+        
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            logits_per_image = outputs.logits_per_image / self.temperature
+            probs = logits_per_image.softmax(dim=1)[0]
+        
+        # Product photo indicators (first 5 labels)
+        product_score = probs[:5].max().item()
+        # Promotional indicators (last 3 labels)
+        promo_score = probs[5:].max().item()
+        
+        # Determine if it's a product photo
+        is_product_photo = product_score > promo_score and product_score > 0.30
+        
+        return {
+            "is_product_photo": is_product_photo,
+            "product_score": product_score,
+            "promo_score": promo_score,
+            "confidence": product_score if is_product_photo else promo_score
+        }
+
     def detect_promo_banner(self, image: Image.Image) -> Dict:
         """Detect promotional content using advanced feature engineering"""
         # Convert image to RGB if needed

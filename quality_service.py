@@ -16,7 +16,7 @@ class QualityCheckService:
         self.max_resolution = 10000  # maximum width/height
         self.min_aspect_ratio = 0.2  # 1:5
         self.max_aspect_ratio = 5.0  # 5:1
-        self.blur_threshold = 150.0  # Laplacian variance threshold (stricter)
+        self.blur_threshold = 100.0  # Laplacian variance threshold
         self.min_filesize = 1024  # 1KB minimum
         
         print("Quality Check Service initialized")
@@ -192,12 +192,15 @@ class QualityCheckService:
             edge_normalized * 15
         ) * 100
         
-        # Thresholds:
-        # < 30: Very blurry (reject)
-        # 30-45: Slightly blurry (borderline)
-        # 45+: Acceptable
-        is_blurry = combined_score < 30
-        is_borderline = 30 <= combined_score < 45
+        # Thresholds (MORE AGGRESSIVE for blur detection):
+        # < 35: Very blurry (reject)
+        # 35-50: Slightly blurry (borderline)
+        # 50+: Acceptable
+        is_blurry = combined_score < 35
+        is_borderline = 35 <= combined_score < 50
+        
+        # Calculate confidence (0.0 to 1.0) - lower score = higher blur confidence
+        blur_confidence = max(0.0, min(1.0, (50 - combined_score) / 50)) if combined_score < 50 else 0.0
         
         details = {
             "combined_score": combined_score,
@@ -205,20 +208,23 @@ class QualityCheckService:
             "tenengrad_score": tenengrad_score,
             "high_freq_energy": high_freq_energy,
             "edge_density": edge_density,
-            "quality_grade": "poor" if is_blurry else "borderline" if is_borderline else "good"
+            "quality_grade": "poor" if is_blurry else "borderline" if is_borderline else "good",
+            "confidence": blur_confidence
         }
         
         if is_blurry:
             return {
                 "passed": False,
                 "reason": f"Image too blurry (score: {combined_score:.1f}/100)",
-                "details": details
+                "details": details,
+                "confidence": blur_confidence
             }
         
         return {
             "passed": True,
             "reason": f"Image sharpness acceptable (score: {combined_score:.1f}/100)",
-            "details": details
+            "details": details,
+            "confidence": blur_confidence
         }
     
     def _check_corrupted(self, image: Image.Image) -> Dict:
@@ -293,6 +299,11 @@ class QualityCheckService:
                 if len(approx) == 4:  # Rectangle
                     rectangular_contours += 1
             
+            # Calculate confidence based on line density and rectangles
+            screenshot_confidence = 0.0
+            if line_density > 0.10 and rectangular_contours > 100:
+                screenshot_confidence = min(1.0, (line_density / 0.15) * (rectangular_contours / 150))
+            
             # Need HIGH line density (UI elements) AND MANY rectangles (>100)
             if line_density > 0.10 and rectangular_contours > 100:
                 return {
@@ -302,13 +313,15 @@ class QualityCheckService:
                         "edge_density": edge_density,
                         "line_density": line_density,
                         "rectangles": rectangular_contours
-                    }
+                    },
+                    "confidence": screenshot_confidence
                 }
         
         return {
             "passed": True,
             "reason": "Not a screenshot",
-            "details": {"edge_density": edge_density}
+            "details": {"edge_density": edge_density},
+            "confidence": 0.0
         }
     
     def detect_watermark(self, img_array: np.ndarray) -> Dict:

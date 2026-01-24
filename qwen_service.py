@@ -51,18 +51,42 @@ class Qwen2VLService:
             top_category = clip_analysis.get("category_analysis", {}).get("top_category", "unknown")
             context = f"\nPreliminary analysis suggests: Category={top_category}, Risk={risk_level}."
         
-        prompt = f"""Analyze this image for content moderation. Provide:
-1. A clear APPROVE or REJECT decision
-2. Detailed explanation of your decision
-3. List any policy violations or concerns
-4. Confidence level (0-100){context}
+        prompt = f"""Analyze this image for content moderation. Focus on:
+1. Is this a PROMOTIONAL/ADVERTISING post? Look for: prices, discounts, "SALE", "EMI", warranty terms, brand names overlaid on products, or marketing text. NOTE: E-commerce product pages with prices ARE promotional but NOT AI-generated.
+
+2. Is this an AI-generated or manipulated image? Carefully check for these AI indicators:
+   VISUAL ARTIFACTS:
+   - Unnatural smoothness or plastic-like skin texture
+   - Warped or asymmetric facial features (eyes, ears, teeth)
+   - Inconsistent lighting or shadows across the image
+   - Blurred or melted backgrounds, especially around edges
+   - Repetitive patterns that look algorithmic
+   - Text that is gibberish, warped, or impossible to read
+   - Impossible anatomy (extra fingers, missing limbs, wrong proportions)
+   - Floating or disconnected body parts
+   - Unrealistic reflections or physics
+   
+   NOT AI-GENERATED:
+   - Professional product photos from e-commerce sites (Haier, Samsung, LG, etc.)
+   - Real photographs with compression artifacts or JPEG noise
+   - Images with genuine watermarks from real websites
+   - Screenshots of real websites or apps
+   - Photos of real physical products, even if promotional
+   
+3. Does it contain watermarks from websites (bikroy, daraz, shutterstock)?
+4. Does it show ACTUAL illegal items? ONLY flag: real guns/weapons, drugs/narcotics, explicit adult content. DO NOT flag normal products like electronics, inverters, UPS, generators, power supplies, etc.
+5. Is the image blurry or a screenshot?{context}
 
 Respond in JSON format:
 {{
-    "decision": "APPROVE/REJECT",
+    "decision": "BLOCK/APPROVE/MANUAL_REVIEW",
     "confidence": 85,
     "explanation": "detailed explanation here",
-    "violations": ["list of violations if any"],
+    "violations": ["promotional_content", "watermark", "illegal_content", "ai_generated"],
+    "is_promotional": true/false,
+    "is_ai_generated": true/false,
+    "ai_artifacts_detected": ["artifact1", "artifact2"],
+    "has_watermark": true/false,
     "categories_detected": ["category1", "category2"],
     "recommended_action": "action recommendation"
 }}"""

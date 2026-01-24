@@ -7,7 +7,7 @@ import json
 
 # Your Modal endpoint URL (you'll get this after deploying)
 # Format: https://YOUR_USERNAME--ai-image-checker-check-image-endpoint.modal.run
-MODAL_ENDPOINT = "https://bdstall-ai--ai-image-checker-check-image-endpoint.modal.run"
+MODAL_ENDPOINT = "https://postman-bdstall--ai-image-checker-check-image-endpoint.modal.run"
 
 
 def test_single_image():

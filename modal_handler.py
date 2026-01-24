@@ -1,6 +1,6 @@
 """
-Modal.com Serverless Handler for AI Image Checker - v2.0 OPTIMIZED
-Hybrid voting system: OpenCV > OCR > Qwen2-VL > CLIP
+Modal.com Serverless Handler for AI Image Checker
+Clean implementation with GPU snapshot optimization
 """
 
 import modal
@@ -8,53 +8,39 @@ import base64
 import io
 import requests
 from PIL import Image
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any
 import traceback
-import os
-import sys
-
-print("Starting Modal handler import... [v2.0 OPTIMIZED]", flush=True)
 
 # Create Modal app
 app = modal.App("ai-image-checker")
 
-# Function to pre-download models during image build (GPU Snapshot)
+# Function to pre-download models during image build
 def download_models():
-    """Download all models during image build to create a GPU-ready snapshot"""
+    """Download all models during image build for GPU snapshot"""
     import os
     os.environ["TRANSFORMERS_CACHE"] = "/root/.cache/huggingface"
     os.environ["HF_HOME"] = "/root/.cache/huggingface"
-    os.environ["TORCH_HOME"] = "/root/.cache/torch"
     
-    print("🔧 Pre-downloading models for GPU snapshot...")
+    print("Downloading models...")
     
-    # Download Transformers models
     from transformers import CLIPModel, CLIPProcessor, Qwen2VLForConditionalGeneration, AutoProcessor
-    print("⬇️ Downloading CLIP model...")
+    
     CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
     CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
     
-    print("⬇️ Downloading Qwen2-VL-2B model...")
     Qwen2VLForConditionalGeneration.from_pretrained(
         "Qwen/Qwen2-VL-2B-Instruct",
         trust_remote_code=True
     )
     AutoProcessor.from_pretrained("Qwen/Qwen2-VL-2B-Instruct", trust_remote_code=True)
     
-    # Download EasyOCR models
     import easyocr
-    print("⬇️ Downloading EasyOCR models...")
     os.makedirs('/root/.cache/easyocr', exist_ok=True)
-    reader = easyocr.Reader(
-        ['en'], 
-        gpu=False,
-        model_storage_directory='/root/.cache/easyocr',
-        download_enabled=True
-    )
+    easyocr.Reader(['en'], gpu=False, model_storage_directory='/root/.cache/easyocr')
     
-    print("✅ All models downloaded to image snapshot!")
+    print("Models downloaded successfully!")
 
-# Define the container image with all dependencies + pre-downloaded models
+# Define the container image
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
@@ -65,14 +51,13 @@ image = (
         "Pillow",
         "qwen-vl-utils",
         "accelerate",
-        "sentencepiece",
         "easyocr",
         "opencv-python-headless",
         "requests",
         "torch",
         "torchvision",
     )
-    .run_function(download_models, gpu="A10G")  # GPU Snapshot: Pre-download models with A10G (same as runtime)
+    .run_function(download_models, gpu="A10G")
     .add_local_file("quality_service.py", "/root/quality_service.py")
     .add_local_file("ocr_service.py", "/root/ocr_service.py")
     .add_local_file("clip_service.py", "/root/clip_service.py")
@@ -82,72 +67,56 @@ image = (
 
 @app.cls(
     image=image,
-    gpu="A10G",  # Nvidia A10G GPU
+    gpu="A10G",
     cpu=8.0,
     memory=16384,
-    timeout=30,  # 30 second timeout
-    scaledown_window=15,  # 15 second cooldown before shutdown
-    enable_memory_snapshot=True,  
-    min_containers=0,  # SHUTS DOWN when not in use (Saves money)
+    timeout=60,
+    scaledown_window=15,
+    enable_memory_snapshot=True,
+    min_containers=0,
     experimental_options={"enable_gpu_snapshot": True},
 )
-@modal.concurrent(max_inputs=10)  
+@modal.concurrent(max_inputs=10)
 class ImageChecker:
-    """Modal class for AI Image Checker with GPU support"""
+    """Modal class for AI Image Checker"""
     
-    @modal.enter(snap=True)  # ✨ ENABLE snapshot capture for ultra-fast cold starts
+    @modal.enter(snap=True)
     def initialize_services(self):
-        """Initialize and WARM UP all services for the GPU Snapshot"""
+        """Initialize services with GPU snapshot"""
         import os
         import sys
-        import torch
         
-        # 1. Set cache directories (models will load from cache automatically)
         os.environ["TRANSFORMERS_CACHE"] = "/root/.cache/huggingface"
         os.environ["HF_HOME"] = "/root/.cache/huggingface"
-        os.environ["TORCH_HOME"] = "/root/.cache/torch"
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-        os.environ["TRANSFORMERS_VERBOSITY"] = "error"
         
         sys.path.insert(0, "/root")
         
-        # Import services AFTER setting env vars
         from quality_service import QualityCheckService
         from ocr_service import OCRService
         from clip_service import CLIPService
         from qwen_service import Qwen2VLService
         
-        # 2. Load all services (silent mode)
         self.quality_service = QualityCheckService()
         self.ocr_service = OCRService(languages=['en'])
         self.clip_service = CLIPService(model_name="openai/clip-vit-base-patch32")
         self.qwen2b_service = Qwen2VLService(model_name="Qwen/Qwen2-VL-2B-Instruct")
     
     def load_image(self, image_input: str) -> Image.Image:
-        """Load image from URL or base64 string"""
+        """Load image from URL or base64"""
         try:
-            # Check if it's a URL
             if image_input.startswith('http://') or image_input.startswith('https://'):
-                # Add browser-like headers to avoid 403 Forbidden errors
                 headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Connection': 'keep-alive',
-                    'Referer': image_input.split('/')[0] + '//' + image_input.split('/')[2] + '/',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 }
-                response = requests.get(image_input, headers=headers, timeout=2)
+                response = requests.get(image_input, headers=headers, timeout=10)
                 response.raise_for_status()
                 image = Image.open(io.BytesIO(response.content))
-            # Check if it's base64
             elif image_input.startswith('data:image'):
-                # Remove data:image/png;base64, prefix
                 base64_str = image_input.split(',')[1]
                 image_data = base64.b64decode(base64_str)
                 image = Image.open(io.BytesIO(image_data))
             else:
-                # Assume raw base64
                 image_data = base64.b64decode(image_input)
                 image = Image.open(io.BytesIO(image_data))
             
@@ -155,103 +124,183 @@ class ImageChecker:
         except Exception as e:
             raise ValueError(f"Failed to load image: {str(e)}")
     
-    def process_single_image(self, image_input: str, category: str, pipeline_mode: str) -> Dict[str, Any]:
+    def process_single_image(self, image_input: str, category: str, pipeline_mode: str, title: str = None) -> Dict[str, Any]:
         """
-        HYBRID VOTING SYSTEM: OpenCV > OCR > Qwen2-VL > CLIP
-        Priority order ensures hard rules override ML models
+        Process a single image through the AI pipeline
+        
+        Args:
+            image_input: Image URL or base64 string
+            category: Product category
+            pipeline_mode: Processing mode (full/fast)
+            title: Optional product title to match against OCR text
         """
         try:
-            # Load image
             image = self.load_image(image_input)
             
-            # Resize to 192px for speed and accuracy balance
-            max_size = 192
+            # Resize for optimal processing (balance speed vs accuracy)
+            max_size = 256
             if max(image.size) > max_size:
                 ratio = max_size / max(image.size)
                 new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
                 image = image.resize(new_size, Image.Resampling.LANCZOS)
             
-            # ========== STEP 1: OpenCV (HARD FILTER) ==========
+            # Quality check (OpenCV)
             quality_result = self.quality_service.check_image(image)
             opencv_risk = quality_result.get("opencv_risk", 0.0)
             screenshot_confidence = quality_result.get("screenshot_confidence", 0.0)
             blur_confidence = quality_result.get("blur_confidence", 0.0)
-            opencv_screenshot_block = screenshot_confidence > 0.7
             
-            # ========== STEP 2: OCR (HARD EVIDENCE LAYER) ==========
+            # OCR analysis
             ocr_result = self.ocr_service.extract_text(image)
             ocr_risk = ocr_result.get("ocr_risk", 0.0)
             watermark_confidence_ocr = ocr_result.get("watermark_confidence", 0.0)
             promo_confidence_ocr = ocr_result.get("promotional_confidence", 0.0)
             watermark_keywords = ocr_result.get("watermark_keywords_found", False)
             bd_marketplace = ocr_result.get("bd_marketplace_watermark", False)
-            promo_keyword_count = ocr_result.get("promo_keyword_count", 0)
-            seller_branding = ocr_result.get("seller_branding_detected", False)
+            has_price = ocr_result.get("has_price", False)
             has_phone_number = ocr_result.get("has_phone_number", False)
-            has_link = ocr_result.get("has_link", False)
+            has_ecommerce_ui = ocr_result.get("has_ecommerce_ui", False)
+            promotional_detected_ocr = ocr_result.get("promotional_detected", False)
             
-            # SKIP CLIP ENTIRELY - only use OpenCV + OCR for maximum speed
+            # NEW: Visual promo indicators
+            visual_promo_score = ocr_result.get("visual_promo_score", 0.0)
+            strong_price_indicator = ocr_result.get("strong_price_indicator", False)
+            has_button_ui = ocr_result.get("has_button_ui", False)
+            digit_count = ocr_result.get("digit_count", 0)
+            
+            # CRITICAL: Check if image shows actual product (using CLIP)
+            # If it's a product photo, text on it is part of the product, NOT promotional
+            product_check = self.clip_service.detect_product_photo(image)
+            is_product_photo = product_check.get("is_product_photo", False)
+            product_photo_confidence = product_check.get("product_score", 0.0)
+            
+            # NEW: Check if product title matches OCR text
+            # If title matches, text is the product name, NOT promotional
+            is_title_match = False
+            if title:
+                full_text = ocr_result.get("full_text", "").lower()
+                title_lower = title.lower().strip()
+                # Check if title words appear in OCR text (fuzzy match)
+                title_words = [w for w in title_lower.split() if len(w) > 1]  # Filter short words (>1 char)
+                # Consider match if >= 60% of significant title words found in OCR text
+                if len(title_words) > 0:
+                    matched_words = sum(1 for word in title_words if word in full_text)
+                    match_ratio = matched_words / len(title_words)
+                    is_title_match = match_ratio >= 0.6
+            
+            # CLIP analysis (skipped for speed - can be enabled if needed)
             clip_risk = 0.0
-            promo_confidence_clip = 0.0
-            watermark_confidence_clip = 0.0
-            illegal_confidence_clip = 0.0
             
-            # ========== STEP 4: Qwen2-VL (ONLY FOR HIGH RISK) ==========
+            # SKIP Qwen2-VL for speed - rely only on fast OCR detection
             qwen_risk = 0.0
             qwen_promo_score = 0.0
             qwen_watermark_score = 0.0
             qwen_illegal_score = 0.0
             
-            # Make Qwen EXTREMELY rare to trigger (almost never)
-            should_escalate = (
-                opencv_risk > 0.9 or 
-                ocr_risk > 0.9
-            )
+            # Calculate final scores
+            screenshot_detected = screenshot_confidence > 0.7
+            blur_detected = blur_confidence > 0.3  # Lowered threshold - more sensitive to blur
             
-            if should_escalate:
-                qwen_result = self.qwen2b_service.moderate_image(image)
-                qwen_decision = qwen_result.get("decision", "APPROVE").upper()
-                qwen_confidence = qwen_result.get("confidence", 0.0)
-                
-                if qwen_decision == "BLOCK":
-                    qwen_risk = qwen_confidence
-                elif qwen_decision == "MANUAL_REVIEW":
-                    qwen_risk = 0.5
-                
-                reasoning = qwen_result.get("reasoning", "").lower()
-                qwen_promo_score = 0.8 if "promotional" in reasoning or "advertisement" in reasoning else 0.0
-                qwen_watermark_score = 0.8 if "watermark" in reasoning or "logo" in reasoning else 0.0
-                qwen_illegal_score = 0.8 if "illegal" in reasoning or "weapon" in reasoning or "drug" in reasoning else 0.0
+            watermark_risk = ocr_risk * watermark_confidence_ocr
+            watermark_detected = watermark_risk > 0.2 or watermark_keywords or bd_marketplace
             
-            # ========== HYBRID VOTING SYSTEM ==========
-            screenshot_detected = opencv_screenshot_block
-            blur_detected = blur_confidence > 0.5
+            # Check if product text only (from OCR)
+            is_product_text_only = ocr_result.get("is_product_text_only", False)
             
-            # Simplified scoring - no CLIP
-            watermark_risk = ocr_risk * watermark_confidence_ocr + 0.2 * qwen_watermark_score
-            watermark_detected = watermark_risk > 0.2 or watermark_keywords or bd_marketplace or watermark_confidence_ocr > 0.6
+            # ========================================================================
+            # PROMOTIONAL DETECTION LOGIC - CRITICAL FOR PRODUCT IMAGES
+            # ========================================================================
+            # Four-tier detection system:
+            # 
+            # 1. PRODUCT TITLE MATCHING (HIGHEST PRIORITY):
+            #    - If product title provided and matches OCR text (>= 60% words match)
+            #    - Text is the product name/description = NOT promotional
+            #    - Example: Title "Dell Inspiron 15" matches "Dell Inspiron 15 3000" in OCR
+            #
+            # 2. VISUAL PRODUCT DETECTION (CLIP-based):
+            #    - If image shows actual product (e.g., camera in box, phone on table)
+            #    - Text on product/packaging is NOT promotional
+            #    - Example: "Imou 3K 5MP" on camera box = SAFE
+            #    - Even if text contains specs/model numbers = SAFE
+            #
+            # 3. TEXT-ONLY PRODUCT DETECTION (OCR-based):
+            #    - If text has NO price, phone, link, or e-commerce UI
+            #    - AND no strong sale terms (buy now, discount, etc.)
+            #    - Then it's likely just product branding = SAFE
+            #    - Example: "Samsung Galaxy A54" without price = SAFE
+            #
+            # 4. PROMOTIONAL SIGNALS (Multi-signal):
+            #    - Price + phone = PROMOTIONAL
+            #    - E-commerce UI buttons = PROMOTIONAL
+            #    - Contact info = PROMOTIONAL
+            #
+            # Priority: Title match > Visual detection > Text detection > Signal detection
+            # ========================================================================
             
-            promo_risk = promo_confidence_ocr + 0.2 * qwen_promo_score
-            promotional_detected = promo_risk > 0.35 or promo_keyword_count >= 2 or seller_branding or has_phone_number or has_link
+            # Promotional detection - RESPECT product title and photo flags
+            promo_risk = promo_confidence_ocr
+            if is_title_match:
+                # Product title matches OCR text = text is product name, NOT promotional
+                promotional_detected = False
+                promo_risk = 0.0
+            elif is_product_photo:
+                # Product photo detected visually = text is part of product, NOT promotional
+                promotional_detected = False
+                promo_risk = 0.0
+            elif is_product_text_only:
+                # Product branding/logos = NOT promotional
+                promotional_detected = False
+                promo_risk = 0.0
+            else:
+                # Multi-signal detection for actual promotional content
+                promotional_detected = (
+                    promotional_detected_ocr or 
+                    has_price or 
+                    has_phone_number or 
+                    has_ecommerce_ui
+                )
             
-            illegal_risk = qwen_illegal_score
-            illegal_detected = illegal_risk > 0.8
+            # Hardcoded: illegal always 0 (only sell legitimate products)
+            illegal_detected = False
             
-            stock_photo_detected = False
-            category_mismatch = False
+            # Final risk calculation (fast mode)
+            # Weight promotional content higher if detected
+            promo_weight = 0.3 if promotional_detected else 0.0
+            final_risk = 0.80 * ocr_risk + 0.20 * opencv_risk + promo_weight
+            risk_level = min(int(final_risk * 100), 100)
             
-            # 70% OCR, 20% Qwen (rarely used), 10% OpenCV
-            final_risk = 0.70 * ocr_risk + 0.20 * qwen_risk + 0.10 * opencv_risk
-            risk_level = int(final_risk * 100)
+            # Calculate promotional text severity (0-10 scale) with visual features
+            promo_score = 0
+            if promotional_detected:
+                # High severity combinations
+                if has_price and has_phone_number:
+                    promo_score = 9  # Price + contact = definite promo
+                elif (has_price or strong_price_indicator) and has_button_ui:
+                    promo_score = 8  # Price + UI buttons = e-commerce
+                elif has_price or strong_price_indicator:
+                    promo_score = 7  # Price alone is strong indicator
+                elif has_ecommerce_ui and visual_promo_score > 0.5:
+                    promo_score = 7  # E-commerce UI + visual cues
+                elif has_button_ui and digit_count >= 6:
+                    promo_score = 6  # UI buttons + many digits
+                elif has_phone_number:
+                    promo_score = 5  # Contact info
+                elif visual_promo_score >= 0.6:
+                    promo_score = 6  # Strong visual indicators
+                elif promo_confidence_ocr > 0.75:
+                    promo_score = 7  # High OCR confidence
+                elif promo_confidence_ocr > 0.5:
+                    promo_score = 4  # Medium confidence
+                else:
+                    promo_score = 3  # Low but detected
             
-            # Build minimal response
             return {
                 "blur_image": 5 if blur_detected else 0,
                 "screen_short": 8 if screenshot_detected else 0,
-                "category_mismatch": 2 if category_mismatch else 0,
-                "illegal": 9 if illegal_detected else 0,
-                "promotional_text": 3 if promotional_detected else 0,
-                "stock_photo": 10 if stock_photo_detected else 0,
+                "category_mismatch": 0,
+                "illegal": 0,  # Always 0 - hardcoded
+                "promotional_text": promo_score,
+                "stock_photo": 0,
                 "watermark": 4 if watermark_detected else 0,
                 "risk_level": risk_level
             }
@@ -272,57 +321,42 @@ class ImageChecker:
     @modal.method()
     def check_image(self, job_input: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Main pipeline handler - supports single or multiple images
+        Main handler - supports single or multiple images
         """
         try:
             pipeline_mode = job_input.get("pipeline", "full")
             
-            # Check if multiple images
+            # Multiple images
             if "images" in job_input:
                 images_list = job_input.get("images", [])
                 
                 if not images_list:
-                    return {"error": "No images provided. Please provide 'images' array."}
+                    return {"error": "No images provided"}
                 
-                # PARALLEL PROCESSING for speed
-                from concurrent.futures import ThreadPoolExecutor, as_completed
-                
-                def process_wrapper(img_data):
+                results = []
+                for img_data in images_list:
                     image_input = img_data.get("image")
                     category = img_data.get("category", "unknown")
+                    title = img_data.get("title")  # Optional product title
                     
                     if not image_input:
-                        return {
-                            "error": "No image URL provided",
-                            "blur_image": 0,
-                            "screen_short": 0,
-                            "category_mismatch": 0,
-                            "illegal": 0,
-                            "promotional_text": 0,
-                            "stock_photo": 0,
-                            "watermark": 0,
-                            "risk_level": 0
-                        }
-                    
-                    return self.process_single_image(image_input, category, pipeline_mode)
-                
-                # Process images in parallel (max 2 threads to avoid contention)
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    futures = [executor.submit(process_wrapper, img_data) for img_data in images_list]
-                    results = [future.result() for future in futures]
+                        results.append({"error": "No image URL provided", "risk_level": 0})
+                    else:
+                        result = self.process_single_image(image_input, category, pipeline_mode, title)
+                        results.append(result)
                 
                 return results
             
+            # Single image
             else:
-                # Single image mode
                 image_input = job_input.get("image")
                 category = job_input.get("category", "unknown")
+                title = job_input.get("title")  # Optional product title
                 
                 if not image_input:
-                    return {"error": "No image provided. Please provide 'image' field with URL or base64 data."}
+                    return {"error": "No image provided"}
                 
-                result = self.process_single_image(image_input, category, pipeline_mode)
-                return result
+                return self.process_single_image(image_input, category, pipeline_mode, title)
             
         except Exception as e:
             return {
@@ -331,14 +365,14 @@ class ImageChecker:
             }
 
 
-# Web endpoint for HTTP requests with GPU support
+# Web endpoint
 @app.function(
     image=image,
-    gpu="A10G",  # GPU for web endpoint
+    gpu="A10G",
     cpu=4.0,
     memory=16384,
-    timeout=30,  # 30 second timeout
-    scaledown_window=15,  # 15 second cooldown before shutdown
+    timeout=60,
+    scaledown_window=15,
     enable_memory_snapshot=True,
     min_containers=0,
     experimental_options={"enable_gpu_snapshot": True},
@@ -351,12 +385,9 @@ def check_image_endpoint():
     
     @web_app.post("/")
     async def process_image(data: Dict[str, Any]):
-        """
-        HTTP endpoint to check images
-        POST with JSON body containing image data
-        """
+        """HTTP endpoint to check images"""
         checker = ImageChecker()
-        return checker.check_image.local(data)  # Use .local() for same-container execution (sync method)
+        return checker.check_image.local(data)
     
     return web_app
 
@@ -364,12 +395,10 @@ def check_image_endpoint():
 # Local entrypoint for testing
 @app.local_entrypoint()
 def main():
-    """Test the image checker locally"""
-    # Example test
+    """Test locally"""
     test_input = {
-        "image": "https://example.com/test-image.jpg",
-        "category": "laptop",
-        "pipeline": "full"
+        "image": "https://picsum.photos/800/600",
+        "category": "electronics"
     }
     
     checker = ImageChecker()
