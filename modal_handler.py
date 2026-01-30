@@ -134,6 +134,16 @@ class ImageChecker:
             pipeline_mode: Processing mode (full/fast)
             title: Optional product title to match against OCR text
         """
+        # Exception categories where promotional_text is always 0
+        exception_categories = [
+            "car", "car accessories",
+            "bike", "bike accessories",
+            "three wheeler", "bicycle", "bicycle accessories",
+            "commercial vehicle", "rental", "vehicle equipment"
+        ]
+        
+        is_exception_category = category.lower().strip() in exception_categories
+        
         try:
             image = self.load_image(image_input)
             
@@ -145,7 +155,7 @@ class ImageChecker:
             
             # Resize for optimal OCR/CLIP processing (balance speed vs accuracy)
             # Note: Quality check done BEFORE resize to preserve blur detection accuracy
-            max_size = 512  # Increased from 256 for better OCR/CLIP accuracy
+            max_size = 800  # Resize to 800x800 for AI processing
             if max(image.size) > max_size:
                 ratio = max_size / max(image.size)
                 new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
@@ -301,7 +311,7 @@ class ImageChecker:
                 "screen_short": 8 if screenshot_detected else 0,
                 "category_mismatch": 0,
                 "illegal": 0,  # Always 0 - hardcoded
-                "promotional_text": promo_score,
+                "promotional_text": 0 if is_exception_category else promo_score,
                 "stock_photo": 0,
                 "watermark": 4 if watermark_detected else 0,
                 "risk_level": risk_level
