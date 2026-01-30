@@ -137,18 +137,19 @@ class ImageChecker:
         try:
             image = self.load_image(image_input)
             
-            # Resize for optimal processing (balance speed vs accuracy)
-            max_size = 256
-            if max(image.size) > max_size:
-                ratio = max_size / max(image.size)
-                new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
-                image = image.resize(new_size, Image.Resampling.LANCZOS)
-            
-            # Quality check (OpenCV)
+            # CRITICAL: Quality check BEFORE resizing - blur detection needs full resolution
             quality_result = self.quality_service.check_image(image)
             opencv_risk = quality_result.get("opencv_risk", 0.0)
             screenshot_confidence = quality_result.get("screenshot_confidence", 0.0)
             blur_confidence = quality_result.get("blur_confidence", 0.0)
+            
+            # Resize for optimal OCR/CLIP processing (balance speed vs accuracy)
+            # Note: Quality check done BEFORE resize to preserve blur detection accuracy
+            max_size = 512  # Increased from 256 for better OCR/CLIP accuracy
+            if max(image.size) > max_size:
+                ratio = max_size / max(image.size)
+                new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
+                image = image.resize(new_size, Image.Resampling.LANCZOS)
             
             # OCR analysis
             ocr_result = self.ocr_service.extract_text(image)
@@ -199,7 +200,8 @@ class ImageChecker:
             
             # Calculate final scores
             screenshot_detected = screenshot_confidence > 0.7
-            blur_detected = blur_confidence > 0.3  # Lowered threshold - more sensitive to blur
+            # FIX: Check if blur check FAILED (not passed) instead of using confidence threshold
+            blur_detected = not quality_result['checks']['blur']['passed']
             
             watermark_risk = ocr_risk * watermark_confidence_ocr
             watermark_detected = watermark_risk > 0.2 or watermark_keywords or bd_marketplace
