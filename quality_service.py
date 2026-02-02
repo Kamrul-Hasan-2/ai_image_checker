@@ -16,7 +16,7 @@ class QualityCheckService:
         self.max_resolution = 10000  # maximum width/height
         self.min_aspect_ratio = 0.2  # 1:5
         self.max_aspect_ratio = 5.0  # 5:1
-        self.blur_threshold = 100.0  # Laplacian variance threshold
+        self.blur_threshold = 70.0  # Laplacian variance threshold (balanced)
         self.min_filesize = 1024  # 1KB minimum
         
         print("Quality Check Service initialized")
@@ -181,7 +181,7 @@ class QualityCheckService:
         mid_freq_energy = np.mean(magnitude_spectrum[mask_mid])
         freq_ratio = high_freq_energy / (mid_freq_energy + 1e-10)  # Sharp images have good ratio
         
-        # Method 4: Edge density and quality - ENHANCED
+        # Method 4: Edge density and quality - ENHANCED WITH PRODUCT PHOTO AWARENESS
         edges = cv2.Canny(img_array, 50, 150)
         edge_density = np.sum(edges > 0) / edges.size
         
@@ -189,6 +189,29 @@ class QualityCheckService:
         strong_edges = cv2.Canny(img_array, 100, 200)
         strong_edge_density = np.sum(strong_edges > 0) / strong_edges.size
         edge_strength_ratio = strong_edge_density / (edge_density + 1e-10)
+        
+        # PRODUCT PHOTO DETECTION: Check if edges are concentrated in center
+        # Product photos often have clean backgrounds with detail in center
+        h, w = img_array.shape
+        center_y, center_w = h // 2, w // 2
+        
+        # Create center mask (50% of image in center)
+        y_start, y_end = h // 4, 3 * h // 4
+        x_start, x_end = w // 4, 3 * w // 4
+        center_edges = edges[y_start:y_end, x_start:x_end]
+        border_edges_top = edges[:h//4, :]
+        border_edges_bottom = edges[3*h//4:, :]
+        border_edges_left = edges[:, :w//4]
+        border_edges_right = edges[:, 3*w//4:]
+        
+        center_edge_density = np.sum(center_edges > 0) / center_edges.size if center_edges.size > 0 else 0
+        border_edge_density = (
+            np.sum(border_edges_top > 0) + np.sum(border_edges_bottom > 0) +
+            np.sum(border_edges_left > 0) + np.sum(border_edges_right > 0)
+        ) / (border_edges_top.size + border_edges_bottom.size + border_edges_left.size + border_edges_right.size + 1e-10)
+        
+        # Product photo indicator: center has much more detail than borders
+        is_product_photo_layout = center_edge_density > (border_edge_density * 2.5) and center_edge_density > 0.08
         
         # Method 5: Multi-scale blur detection (NEW)
         # Sharp images maintain detail across scales
@@ -242,84 +265,88 @@ class QualityCheckService:
         contrast = np.std(img_array)
         dynamic_range = np.max(img_array) - np.min(img_array)
         
-        # BALANCED noise detection - catch poor quality without false positives
+        # BALANCED noise detection - catch real noise without false positives
+        # Distinguish between texture/grain and problematic noise
+        # Soft/lenient to avoid false positives on textured products
         is_noisy = (
-            noise_score > 110 or  # Moderate threshold
-            high_freq_noise > 6 or  # Reasonable threshold
-            snr < 8 or  # Poor signal quality
-            (texture_consistency > 700 and noise_score > 85)  # Grainy texture
+            noise_score > 200 or  # Soft threshold - only extreme noise
+            high_freq_noise > 11 or  # Soft threshold - only extreme noise
+            snr < 3.5 or  # Soft threshold - only extremely poor signal
+            (texture_consistency > 1200 and noise_score > 160)  # Soft combined check
         )
         
-        # Calculate penalties for poor quality indicators
+        # Calculate penalties for poor quality indicators (BALANCED)
         noise_penalty = 0
         if is_noisy:
-            # Progressive penalty based on severity - INCREASED
-            if noise_score > 180 or high_freq_noise > 9 or snr < 5:
-                noise_penalty = 40  # Severe noise - INCREASED
-            elif noise_score > 130 or high_freq_noise > 7 or snr < 8:
-                noise_penalty = 32  # High noise - INCREASED
+            # Progressive penalty based on severity - SOFT/LENIENT
+            if noise_score > 280 or high_freq_noise > 13 or snr < 2.5:
+                noise_penalty = 30  # Severe noise - soft threshold
+            elif noise_score > 230 or high_freq_noise > 12 or snr < 3.5:
+                noise_penalty = 22  # High noise - soft threshold
             else:
-                noise_penalty = 25  # Moderate noise - INCREASED
+                noise_penalty = 16  # Moderate noise
         
-        # Low detail penalty - BALANCED - catch genuinely low detail images
+        # Low detail penalty - BALANCED - catch blurry images without false positives
         detail_penalty = 0
-        if detail_loss_3x3 < 0.8:  # Severe lack of detail
-            detail_penalty = 40  # MASSIVE penalty
-        elif detail_loss_3x3 < 1.5:  # Moderate lack of detail
-            detail_penalty = 30  # Very high penalty
-        elif detail_loss_3x3 < 2.5:  # Some lack of detail
-            detail_penalty = 20
-        elif wavelet_energy < 5:
+        if detail_loss_3x3 < 0.6:  # Severe lack of detail
+            detail_penalty = 30  # BALANCED penalty
+        elif detail_loss_3x3 < 1.2:  # Moderate lack of detail
+            detail_penalty = 22  # BALANCED penalty
+        elif detail_loss_3x3 < 2.0:  # Some lack of detail
             detail_penalty = 15
+        elif wavelet_energy < 4:
+            detail_penalty = 12
         
-        # Motion blur penalty - MASSIVE
+        # Motion blur penalty - BALANCED
         motion_blur_penalty = 0
         if is_motion_blurred:
-            motion_blur_penalty = 35  # HUGE penalty for motion blur
+            motion_blur_penalty = 25  # BALANCED penalty for motion blur
         
-        # Severe blur penalty (very low Laplacian) - BALANCED STRICTNESS
+        # Severe blur penalty (very low Laplacian) - BALANCED
         severe_blur_penalty = 0
-        if laplacian_var < 80:  # Extremely blurry
-            severe_blur_penalty = 40  # MASSIVE penalty
-        elif laplacian_var < 200:  # Very blurry
-            severe_blur_penalty = 30  # Very high penalty
-        elif laplacian_var < 350:  # Moderate blur
-            severe_blur_penalty = 20
+        if laplacian_var < 60:  # Extremely blurry
+            severe_blur_penalty = 35  # BALANCED penalty
+        elif laplacian_var < 150:  # Very blurry
+            severe_blur_penalty = 25  # BALANCED penalty
+        elif laplacian_var < 300:  # Moderate blur
+            severe_blur_penalty = 16
+        elif laplacian_var < 450:  # Subtle blur
+            severe_blur_penalty = 10
         
-        # Poor contrast penalty
+        # Poor contrast penalty (BALANCED)
         contrast_penalty = 0
-        if contrast < 30 or dynamic_range < 100:
-            contrast_penalty = 8  # Very low contrast/flat image
+        if contrast < 25 or dynamic_range < 90:
+            contrast_penalty = 6  # Very low contrast/flat image
         
         # Combined quality penalty - BALANCED
-        # Catch genuinely noisy images without penalizing clean photos
+        # Catch poor quality without penalizing good images
         combined_quality_penalty = 0
-        if is_noisy and laplacian_var < 400:  # Noisy + low sharpness
-            combined_quality_penalty = 25
-        elif is_noisy and snr < 10:  # Noisy + poor SNR
-            combined_quality_penalty = 20
-        elif is_noisy and laplacian_var < 600:  # Noisy + moderate sharpness
+        if is_noisy and laplacian_var < 180:  # Noisy + low sharpness - soft
+            combined_quality_penalty = 18
+        elif is_noisy and snr < 3.0:  # Noisy + poor SNR - soft
             combined_quality_penalty = 15
+        elif is_noisy and laplacian_var < 320:  # Noisy + moderate sharpness - soft
+            combined_quality_penalty = 10
         
-        # ENHANCED SCORING with ABSOLUTE MAXIMUM strictness
-        # Normalize scores with DRASTICALLY LOWER thresholds - REJECT EVERYTHING BLURRY
-        laplacian_normalized = min(laplacian_var / 150.0, 1.0)  # Lowered from 200 - EXTREME
-        laplacian_mean_norm = min(laplacian_mean / 6.0, 1.0)  # Lowered from 8
+        # BALANCED SCORING - Moderate thresholds
+        # Normalize scores with BALANCED thresholds
+        laplacian_normalized = min(laplacian_var / 300.0, 1.0)  # Balanced threshold
+        laplacian_mean_norm = min(laplacian_mean / 8.5, 1.0)  # Balanced threshold
         
-        tenengrad_normalized = min(tenengrad_score / 300.0, 1.0)  # Lowered from 400 - EXTREME
-        gradient_std_norm = min(gradient_std / 15.0, 1.0)  # Lowered from 18
+        tenengrad_normalized = min(tenengrad_score / 500.0, 1.0)  # Balanced threshold
+        gradient_std_norm = min(gradient_std / 18.0, 1.0)  # Balanced threshold
         
-        fft_normalized = min(high_freq_energy / 15.0, 1.0)  # Lowered from 20 - EXTREME
-        freq_ratio_norm = min(freq_ratio / 0.25, 1.0)  # Lowered from 0.3
+        fft_normalized = min(high_freq_energy / 21.0, 1.0)  # Balanced threshold
+        freq_ratio_norm = min(freq_ratio / 0.30, 1.0)  # Balanced threshold
         
-        edge_normalized = min(edge_density / 0.06, 1.0)  # Lowered from 0.08 - EXTREME
-        edge_strength_norm = min(edge_strength_ratio / 0.25, 1.0)  # Lowered from 0.3
+        edge_normalized = min(edge_density / 0.08, 1.0)  # Balanced threshold
+        edge_strength_norm = min(edge_strength_ratio / 0.30, 1.0)  # Balanced threshold
         
-        detail_normalized = min(detail_loss_3x3 / 3.5, 1.0)  # Lowered from 4.5 - EXTREME
-        wavelet_normalized = min(wavelet_energy / 10.0, 1.0)  # Lowered from 12.0
+        detail_normalized = min(detail_loss_3x3 / 4.5, 1.0)  # Balanced threshold
+        wavelet_normalized = min(wavelet_energy / 12.0, 1.0)  # Balanced threshold
         
-        snr_normalized = min(snr / 8.0, 1.0)  # Lowered from 10.0
-        contrast_normalized = min(contrast / 40.0, 1.0)  # Lowered from 45.0
+        snr_normalized = min(snr / 10.0, 1.0)  # Balanced threshold
+        contrast_normalized = min(contrast / 42.0, 1.0)  # Balanced threshold
         
         # WEIGHTED COMBINED SCORE with all features (0-100)
         combined_score = (
@@ -340,32 +367,36 @@ class QualityCheckService:
         # Apply ALL penalties (now includes combined quality penalty)
         combined_score = max(0, combined_score - noise_penalty - detail_penalty - motion_blur_penalty - severe_blur_penalty - contrast_penalty - combined_quality_penalty)
         
-        # HARD REJECTION - BALANCED to catch true problems
+        # HARD REJECTION - BALANCED to catch real blur without false positives
+        # Be lenient with product photos (concentrated detail in center)
         hard_reject = (
-            laplacian_var < 80 or  # Extremely low sharpness
-            detail_loss_3x3 < 0.8 or  # Almost no detail
-            wavelet_energy < 8 or  # Very low detail energy
-            (is_motion_blurred and laplacian_var < 200) or  # Motion blur
-            (laplacian_var < 150 and detail_loss_3x3 < 1.5) or  # Combined low indicators
-            edge_density < 0.025 or  # Very few edges
-            (is_noisy and laplacian_var < 250) or  # Noisy + low sharpness
-            snr < 3 or  # Extremely poor signal
-            (is_noisy and snr < 8 and laplacian_var < 400) or  # Noisy + poor SNR + low sharpness
-            (noise_score > 150 and laplacian_var < 500)  # High noise + moderate sharpness
+            laplacian_var < 60 or  # Extremely low sharpness (BALANCED)
+            detail_loss_3x3 < 0.6 or  # Almost no detail (BALANCED)
+            wavelet_energy < 6 or  # Very low detail energy (BALANCED)
+            (is_motion_blurred and laplacian_var < 150) or  # Motion blur (BALANCED)
+            (laplacian_var < 120 and detail_loss_3x3 < 1.2) or  # Combined low indicators (BALANCED)
+            (laplacian_var < 240 and detail_loss_3x3 < 2.0 and not is_product_photo_layout) or  # Subtle combined (BALANCED)
+            (edge_density < 0.020 and not is_product_photo_layout) or  # Very few edges (BALANCED)
+            (edge_density < 0.04 and laplacian_var < 320 and not is_product_photo_layout) or  # Low edges (BALANCED)
+            (is_noisy and laplacian_var < 130) or  # Noisy + low sharpness - soft
+            snr < 1.2 or  # Extremely poor signal - soft
+            (is_noisy and snr < 3.0 and laplacian_var < 200) or  # Noisy + poor SNR - soft
+            (noise_score > 270 and laplacian_var < 300) or  # High noise - soft
+            (tenengrad_score < 220 and laplacian_var < 320 and not is_product_photo_layout)  # Low gradient (BALANCED)
         )
         
         if hard_reject:
             combined_score = 0  # Force rejection
         
-        # BALANCED STRICTNESS:
-        # < 65: Poor quality (REJECT)
-        # 65-75: Borderline quality
-        # 75+: Acceptable (good product photos)
-        is_blurry = combined_score < 65
-        is_borderline = 65 <= combined_score < 75
+        # BALANCED THRESHOLDS:
+        # < 72: Poor quality (REJECT)
+        # 72-82: Borderline quality
+        # 82+: Acceptable (good product photos)
+        is_blurry = combined_score < 72
+        is_borderline = 72 <= combined_score < 82
         
         # Calculate confidence (0.0 to 1.0) - lower score = higher blur confidence
-        blur_confidence = max(0.0, min(1.0, (75 - combined_score) / 75)) if combined_score < 75 else 0.0
+        blur_confidence = max(0.0, min(1.0, (82 - combined_score) / 82)) if combined_score < 82 else 0.0
         
         # Determine failure reason with detailed diagnosis
         quality_issues = []
@@ -399,6 +430,9 @@ class QualityCheckService:
         details = {
             "combined_score": combined_score,
             "hard_reject": hard_reject,
+            "is_product_photo_layout": is_product_photo_layout,
+            "center_edge_density": center_edge_density,
+            "border_edge_density": border_edge_density,
             "laplacian_var": laplacian_var,
             "laplacian_mean": laplacian_mean,
             "tenengrad_score": tenengrad_score,
@@ -434,16 +468,22 @@ class QualityCheckService:
         }
         
         if is_blurry:
+            reason_text = f"Image too {quality_issue} (score: {combined_score:.1f}/100)"
+            if is_product_photo_layout:
+                reason_text += " [Product layout]"
             return {
                 "passed": False,
-                "reason": f"Image too {quality_issue} (score: {combined_score:.1f}/100)",
+                "reason": reason_text,
                 "details": details,
                 "confidence": blur_confidence
             }
         
+        reason_text = f"Image sharpness acceptable (score: {combined_score:.1f}/100)"
+        if is_product_photo_layout:
+            reason_text += " [Product layout]"
         return {
             "passed": True,
-            "reason": f"Image sharpness acceptable (score: {combined_score:.1f}/100)",
+            "reason": reason_text,
             "details": details,
             "confidence": blur_confidence
         }

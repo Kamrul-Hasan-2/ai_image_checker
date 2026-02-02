@@ -245,9 +245,64 @@ class OCRService:
         # DETECT PRODUCT TEXT vs PROMOTIONAL TEXT
         # Product text characteristics:
         # - Part of the product (brand names, model numbers, specs on device)
-        # - Usually centered, small text areas
+        # - Usually centered, small text areas, integrated into product
         # - No prices, phone numbers, or contact info
         # - Technical specs without "buy/sale" context
+        # - Often in product color/design (black text on black product)
+        
+        # Analyze text spatial distribution (product text is usually centered on product)
+        text_positions = []
+        text_sizes = []
+        for (bbox, text, confidence) in unique_results:
+            bbox_array = np.array(bbox)
+            center_x = np.mean(bbox_array[:, 0])
+            center_y = np.mean(bbox_array[:, 1])
+            width = np.max(bbox_array[:, 0]) - np.min(bbox_array[:, 0])
+            height = np.max(bbox_array[:, 1]) - np.min(bbox_array[:, 1])
+            
+            text_positions.append((center_x / img_width, center_y / img_height))
+            text_sizes.append(width * height)
+        
+        # Product text is typically:
+        # 1. Centered in image (product photo centered)
+        # 2. Small relative to image size
+        # 3. Not concentrated at edges/corners (where overlay text usually is)
+        is_centered_text = False
+        is_small_text = False
+        is_not_corner_text = True
+        
+        if text_positions:
+            avg_x = np.mean([pos[0] for pos in text_positions])
+            avg_y = np.mean([pos[1] for pos in text_positions])
+            
+            # Centered: between 0.3-0.7 in both x and y
+            is_centered_text = 0.25 < avg_x < 0.75 and 0.25 < avg_y < 0.75
+            
+            # Small text: average text size < 3% of image area
+            avg_text_size = np.mean(text_sizes) if text_sizes else 0
+            is_small_text = avg_text_size < (total_area * 0.03)
+            
+            # Check if text is at corners/edges (promotional overlay pattern)
+            corner_text_count = sum(1 for pos in text_positions 
+                                   if (pos[0] < 0.15 or pos[0] > 0.85) or 
+                                      (pos[1] < 0.15 or pos[1] > 0.85))
+            is_not_corner_text = corner_text_count < len(text_positions) * 0.5
+        
+        # Product-specific text patterns (brand names, model numbers, specs)
+        product_text_patterns = [
+            # Brand/model indicators
+            r'\b[A-Z][a-z]+\s+[A-Z0-9]+',  # Brand Model (e.g., Canon 600D)
+            r'\b[0-9]{2,5}[A-Z]{1,3}\b',  # Model numbers (e.g., 600D, 18000BTU)
+            r'\b[A-Z]{2,10}\b',  # Brand names in caps (e.g., INSULATING, CANON)
+            # Measurements/specs on product
+            r'\d+\s*(mm|cm|inch|ml|kg|w|v|hz|btu|rpm)',  # 14mm, 18000 BTU
+            r'\d+x\d+',  # Dimensions: 10x14
+            # Product features
+            r'\b(pro|plus|max|ultra|mini|lite)\b',
+        ]
+        
+        has_product_pattern = any(re.search(pattern, full_text, re.IGNORECASE) 
+                                 for pattern in product_text_patterns)
         
         # SIMPLIFIED: If no price, phone, or link + no strong sale terms = product text
         is_product_text_only = False
@@ -256,12 +311,32 @@ class OCRService:
             # If there's text but no promotional intent, likely product branding
             if len(all_text) > 0:
                 # Must NOT have strong sale terms
-                strong_sale_terms = ["buy now", "call now", "order now", "sale", "discount", "offer"]
+                strong_sale_terms = ["buy now", "call now", "order now", "sale", "discount", "offer", 
+                                    "shop now", "visit us", "contact", "inbox", "dm us", "whatsapp"]
                 has_strong_sale = any(term in full_text_lower for term in strong_sale_terms)
                 
                 if not has_strong_sale:
-                    # Likely just product text (brand, model, specs)
-                    is_product_text_only = True
+                    # Additional checks for product text
+                    # Product text is usually: centered + small OR has product patterns
+                    product_text_confidence = 0
+                    
+                    if is_centered_text:
+                        product_text_confidence += 1
+                    if is_small_text:
+                        product_text_confidence += 1
+                    if is_not_corner_text:
+                        product_text_confidence += 1
+                    if has_product_pattern:
+                        product_text_confidence += 2
+                    if len(all_text) <= 5:  # Few text elements = likely product branding
+                        product_text_confidence += 1
+                    if len(all_text) <= 10 and text_coverage < 10:  # Low text coverage
+                        product_text_confidence += 1
+                    
+                    # If confidence >= 2 (LOWERED from 3), it's product text
+                    # This catches more genuine product text cases
+                    if product_text_confidence >= 2:
+                        is_product_text_only = True
         
         # MULTI-SIGNAL PROMOTIONAL CONFIDENCE (0.0 to 1.0)
         promo_confidence = 0.0

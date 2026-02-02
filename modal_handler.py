@@ -124,7 +124,7 @@ class ImageChecker:
         except Exception as e:
             raise ValueError(f"Failed to load image: {str(e)}")
     
-    def process_single_image(self, image_input: str, category: str, pipeline_mode: str, title: str = None) -> Dict[str, Any]:
+    def process_single_image(self, image_input: str, category: str, pipeline_mode: str, title: str = None, description: str = None) -> Dict[str, Any]:
         """
         Process a single image through the AI pipeline
         
@@ -133,6 +133,7 @@ class ImageChecker:
             category: Product category
             pipeline_mode: Processing mode (full/fast)
             title: Optional product title to match against OCR text
+            description: Optional product description to match against OCR text
         """
         # Exception categories where promotional_text is always 0
         exception_categories = [
@@ -185,19 +186,35 @@ class ImageChecker:
             is_product_photo = product_check.get("is_product_photo", False)
             product_photo_confidence = product_check.get("product_score", 0.0)
             
-            # NEW: Check if product title matches OCR text
-            # If title matches, text is the product name, NOT promotional
+            # NEW: Check if product title/description matches OCR text
+            # If title/description provided but doesn't match OCR = PROMOTIONAL (mismatch)
             is_title_match = False
-            if title:
+            has_title_or_description = bool(title or description)
+            title_description_mismatch = False
+            
+            if has_title_or_description:
                 full_text = ocr_result.get("full_text", "").lower()
-                title_lower = title.lower().strip()
-                # Check if title words appear in OCR text (fuzzy match)
-                title_words = [w for w in title_lower.split() if len(w) > 1]  # Filter short words (>1 char)
-                # Consider match if >= 60% of significant title words found in OCR text
-                if len(title_words) > 0:
-                    matched_words = sum(1 for word in title_words if word in full_text)
-                    match_ratio = matched_words / len(title_words)
+                
+                # Combine title and description for matching
+                combined_text = ""
+                if title:
+                    combined_text += title.lower().strip() + " "
+                if description:
+                    combined_text += description.lower().strip()
+                
+                combined_text = combined_text.strip()
+                
+                # Check if title/description words appear in OCR text (fuzzy match)
+                product_words = [w for w in combined_text.split() if len(w) > 1]  # Filter short words (>1 char)
+                # Consider match if >= 60% of significant product words found in OCR text
+                if len(product_words) > 0:
+                    matched_words = sum(1 for word in product_words if word in full_text)
+                    match_ratio = matched_words / len(product_words)
                     is_title_match = match_ratio >= 0.6
+                    
+                    # If title/description provided but doesn't match OCR = MISMATCH
+                    if not is_title_match and len(full_text) > 10:  # Only if OCR has meaningful text
+                        title_description_mismatch = True
             
             # CLIP analysis (skipped for speed - can be enabled if needed)
             clip_risk = 0.0
@@ -250,17 +267,26 @@ class ImageChecker:
             # ========================================================================
             
             # Promotional detection - RESPECT product title and photo flags
+            # NEW LOGIC: If title/description provided but doesn't match = FORCE PROMOTIONAL
+            # PRIORITY ORDER: product_text_only > title_match > product_photo > signals
             promo_risk = promo_confidence_ocr
-            if is_title_match:
+            
+            # HIGHEST PRIORITY: Product text only (text physically on product body)
+            if is_product_text_only:
+                # Text is PART OF THE PRODUCT (like "INSULATING" on tool, "Canon" on camera)
+                # This is NOT promotional - it's product branding/labeling
+                promotional_detected = False
+                promo_risk = 0.0
+            elif title_description_mismatch:
+                # Title/description provided but OCR text doesn't match = PROMOTIONAL
+                promotional_detected = True
+                promo_risk = 0.95  # High confidence it's promotional
+            elif is_title_match:
                 # Product title matches OCR text = text is product name, NOT promotional
                 promotional_detected = False
                 promo_risk = 0.0
             elif is_product_photo:
                 # Product photo detected visually = text is part of product, NOT promotional
-                promotional_detected = False
-                promo_risk = 0.0
-            elif is_product_text_only:
-                # Product branding/logos = NOT promotional
                 promotional_detected = False
                 promo_risk = 0.0
             else:
@@ -284,8 +310,11 @@ class ImageChecker:
             # Calculate promotional text severity (0-10 scale) with visual features
             promo_score = 0
             if promotional_detected:
+                # HIGHEST PRIORITY: Title/description mismatch
+                if title_description_mismatch:
+                    promo_score = 10  # Maximum score - text doesn't match product info
                 # High severity combinations
-                if has_price and has_phone_number:
+                elif has_price and has_phone_number:
                     promo_score = 9  # Price + contact = definite promo
                 elif (has_price or strong_price_indicator) and has_button_ui:
                     promo_score = 8  # Price + UI buttons = e-commerce
@@ -345,16 +374,23 @@ class ImageChecker:
                 if not images_list:
                     return {"error": "No images provided"}
                 
+                # Get common fields (shared across all images)
+                common_category = job_input.get("category", "unknown")
+                common_title = job_input.get("title")  # Optional product title
+                common_description = job_input.get("description")  # Optional product description
+                
                 results = []
                 for img_data in images_list:
                     image_input = img_data.get("image")
-                    category = img_data.get("category", "unknown")
-                    title = img_data.get("title")  # Optional product title
+                    # Allow per-image override, but use common values by default
+                    category = img_data.get("category", common_category)
+                    title = img_data.get("title", common_title)
+                    description = img_data.get("description", common_description)
                     
                     if not image_input:
                         results.append({"error": "No image URL provided", "risk_level": 0})
                     else:
-                        result = self.process_single_image(image_input, category, pipeline_mode, title)
+                        result = self.process_single_image(image_input, category, pipeline_mode, title, description)
                         results.append(result)
                 
                 return results
@@ -364,11 +400,12 @@ class ImageChecker:
                 image_input = job_input.get("image")
                 category = job_input.get("category", "unknown")
                 title = job_input.get("title")  # Optional product title
+                description = job_input.get("description")  # Optional product description
                 
                 if not image_input:
                     return {"error": "No image provided"}
                 
-                return self.process_single_image(image_input, category, pipeline_mode, title)
+                return self.process_single_image(image_input, category, pipeline_mode, title, description)
             
         except Exception as e:
             return {
