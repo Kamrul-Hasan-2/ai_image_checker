@@ -72,8 +72,79 @@ class CLIPService:
         bottom_region = image.crop((0, int(height * 0.7), width, height))
         regions.append(bottom_region)
         return regions
+    
+    def verify_image_body_content(self, image: Image.Image, title: str, description: str) -> Dict:
+        """Verify if image body content matches product title/description
         
-        return regions
+        This checks if the image actually shows what it's supposed to show.
+        For example: if title is "RAM Memory", image should show RAM hardware.
+        This prevents promotional images from being misclassified as product images.
+        
+        Args:
+            image: PIL Image to verify
+            title: Product title (e.g., "SK Hynix 8GB RAM")
+            description: Product description
+            
+        Returns:
+            Dict with body_matches (bool) and confidence (float)
+        """
+        if not title and not description:
+            return {"body_matches": False, "confidence": 0.0}
+        
+        # Convert image to RGB
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Keep prompts short to avoid CLIP's 77 token limit
+        # Extract first 5-6 words from title for compact prompt
+        product_words = (title or description or "").split()[:6]
+        product_text = " ".join(product_words).lower()
+        
+        # SHORT verification prompts (under 77 tokens total)
+        verification_prompts = [
+            f"photo of {product_text}",
+            f"real {product_text}",
+            "product photo on white background"
+        ]
+        
+        # SHORT negative prompts
+        negative_prompts = [
+            "promotional ad with text",
+            "marketing banner",
+            "sale advertisement"
+        ]
+        
+        all_prompts = verification_prompts + negative_prompts
+        
+        inputs = self.processor(
+            text=all_prompts,
+            images=image,
+            return_tensors="pt",
+            padding=True
+        ).to(self.device)
+        
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            logits_per_image = outputs.logits_per_image / self.temperature
+            probs = logits_per_image.softmax(dim=1)[0]
+        
+        # Calculate scores
+        verification_scores = probs[:len(verification_prompts)]
+        negative_scores = probs[len(verification_prompts):]
+        
+        avg_verification = verification_scores.mean().item()
+        avg_negative = negative_scores.mean().item()
+        
+        # Body matches if verification score > negative score
+        body_matches = avg_verification > avg_negative
+        confidence = avg_verification - avg_negative
+        
+        return {
+            "body_matches": body_matches,
+            "confidence": max(0.0, confidence),
+            "verification_score": avg_verification,
+            "negative_score": avg_negative
+        }
     
     def check_illegal_content(self, image: Image.Image) -> Dict:
         """Check if image contains illegal products with enhanced accuracy"""
@@ -998,16 +1069,16 @@ class CLIPService:
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
-        # Labels to identify product photos vs promotional content
+        # Enhanced labels to identify product photos (especially hardware/electronics)
         product_labels = [
-            "clean product photography on white background",
-            "product photo in packaging box",
-            "professional product image without text overlay",
-            "product displayed on shelf or table",
-            "e-commerce product listing photo",
-            "promotional advertisement banner with text",
-            "marketing poster with contact information",
-            "advertisement flyer with sale offers"
+            "product photo white background",
+            "hardware component close-up",
+            "electronics product packaging",
+            "product on black background",
+            "isolated product image",
+            "promotional ad with text overlay",
+            "marketing banner sale",
+            "advertisement contact info"
         ]
         
         inputs = self.processor(
@@ -1027,8 +1098,8 @@ class CLIPService:
         # Promotional indicators (last 3 labels)
         promo_score = probs[5:].max().item()
         
-        # Determine if it's a product photo
-        is_product_photo = product_score > promo_score and product_score > 0.30
+        # Determine if it's a product photo - lower threshold for better detection
+        is_product_photo = product_score > promo_score and product_score > 0.25
         
         return {
             "is_product_photo": is_product_photo,

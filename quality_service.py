@@ -16,7 +16,7 @@ class QualityCheckService:
         self.max_resolution = 10000  # maximum width/height
         self.min_aspect_ratio = 0.2  # 1:5
         self.max_aspect_ratio = 5.0  # 5:1
-        self.blur_threshold = 70.0  # Laplacian variance threshold (balanced)
+        self.blur_threshold = 65.0  # Laplacian variance threshold (balanced)
         self.min_filesize = 1024  # 1KB minimum
         
         print("Quality Check Service initialized")
@@ -368,35 +368,38 @@ class QualityCheckService:
         combined_score = max(0, combined_score - noise_penalty - detail_penalty - motion_blur_penalty - severe_blur_penalty - contrast_penalty - combined_quality_penalty)
         
         # HARD REJECTION - BALANCED to catch real blur without false positives
-        # Be lenient with product photos (concentrated detail in center)
+        # Catch genuinely blurry/poor quality images only
         hard_reject = (
-            laplacian_var < 60 or  # Extremely low sharpness (BALANCED)
-            detail_loss_3x3 < 0.6 or  # Almost no detail (BALANCED)
-            wavelet_energy < 6 or  # Very low detail energy (BALANCED)
-            (is_motion_blurred and laplacian_var < 150) or  # Motion blur (BALANCED)
-            (laplacian_var < 120 and detail_loss_3x3 < 1.2) or  # Combined low indicators (BALANCED)
-            (laplacian_var < 240 and detail_loss_3x3 < 2.0 and not is_product_photo_layout) or  # Subtle combined (BALANCED)
-            (edge_density < 0.020 and not is_product_photo_layout) or  # Very few edges (BALANCED)
-            (edge_density < 0.04 and laplacian_var < 320 and not is_product_photo_layout) or  # Low edges (BALANCED)
-            (is_noisy and laplacian_var < 130) or  # Noisy + low sharpness - soft
-            snr < 1.2 or  # Extremely poor signal - soft
-            (is_noisy and snr < 3.0 and laplacian_var < 200) or  # Noisy + poor SNR - soft
-            (noise_score > 270 and laplacian_var < 300) or  # High noise - soft
-            (tenengrad_score < 220 and laplacian_var < 320 and not is_product_photo_layout)  # Low gradient (BALANCED)
+            laplacian_var < 50 or  # Extremely low sharpness - truly blurry
+            detail_loss_3x3 < 0.5 or  # Almost no detail - severe blur
+            wavelet_energy < 5 or  # Very low detail energy - severe
+            (is_motion_blurred and laplacian_var < 150) or  # Clear motion blur
+            (laplacian_var < 100 and detail_loss_3x3 < 1.0) or  # Combined severe indicators
+            (laplacian_var < 250 and detail_loss_3x3 < 1.5 and not is_product_photo_layout) or  # Regular blur
+            (edge_density < 0.015 and not is_product_photo_layout) or  # Very few edges
+            (edge_density < 0.03 and laplacian_var < 200 and not is_product_photo_layout) or  # Low edges + blur
+            (is_noisy and laplacian_var < 120) or  # Noisy + low sharpness
+            snr < 1.0 or  # Extremely poor signal
+            (is_noisy and snr < 3.0 and laplacian_var < 150) or  # Noisy + poor SNR
+            (noise_score > 300 and laplacian_var < 250) or  # Extreme noise
+            (tenengrad_score < 200 and laplacian_var < 250 and not is_product_photo_layout) or  # Low gradient
+            (wavelet_energy < 7 and laplacian_var < 300) or  # Low detail energy
+            (gradient_std < 10 and laplacian_var < 250) or  # Very low gradient variation
+            (contrast < 20 and laplacian_var < 300)  # Very low contrast + blur
         )
         
         if hard_reject:
             combined_score = 0  # Force rejection
         
-        # BALANCED THRESHOLDS:
-        # < 72: Poor quality (REJECT)
-        # 72-82: Borderline quality
-        # 82+: Acceptable (good product photos)
-        is_blurry = combined_score < 72
-        is_borderline = 72 <= combined_score < 82
+        # BALANCED THRESHOLDS - Catch real blur, not good images
+        # < 68: Poor quality (REJECT) - Genuinely blurry
+        # 68-78: Borderline quality - Some issues
+        # 78+: Acceptable (good quality)
+        is_blurry = combined_score < 68
+        is_borderline = 68 <= combined_score < 78
         
         # Calculate confidence (0.0 to 1.0) - lower score = higher blur confidence
-        blur_confidence = max(0.0, min(1.0, (82 - combined_score) / 82)) if combined_score < 82 else 0.0
+        blur_confidence = max(0.0, min(1.0, (78 - combined_score) / 78)) if combined_score < 78 else 0.0
         
         # Determine failure reason with detailed diagnosis
         quality_issues = []

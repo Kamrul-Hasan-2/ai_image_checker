@@ -153,16 +153,25 @@ class OCRService:
             watermark_confidence = 0.65  # Many text elements suggest watermark
         
         # RULE-BASED PROMOTIONAL TEXT DETECTION
-        # Phone number patterns (English and Bengali digits)
+        # Phone number patterns (English and Bengali digits) - ENHANCED
         phone_patterns = [
             r'\+?88[0-9]{11}',  # Bangladesh: +8801712345678
+            r'\+?৮৮[০-৯]{11}',  # Bangladesh Bengali: +৮৮০১৭১২৩৪৫৬৭৮
             r'01[0-9]{9}',      # Mobile: 01712345678
-            r'[0-9]{3}[-.\\s_]?[0-9]{3,4}[-.\\s_]?[0-9]{2}[-.\\s_]?[0-9]{2}',  # With separators
-            r'০১[০-৯]{9}',      # Bengali digits: ০১৭১২৩৪৫৬৭৮
+            r'০১[০-৯]{9}',      # Bengali mobile: ০১৭১২৩৪৫৬৭৮
+            r'[0-9]{3}[-.\\s_:,]?[0-9]{3,4}[-.\\s_:,]?[0-9]{2}[-.\\s_:,]?[0-9]{2}',  # With separators
+            r'[০-৯]{3}[-.\\s_:,]?[০-৯]{3,4}[-.\\s_:,]?[০-৯]{2}[-.\\s_:,]?[০-৯]{2}',  # Bengali with separators
             r'[০-৯]{11}',       # 11 Bengali digits
-            r'[0-9]{10,11}',    # Simple 10-11 digit sequence (phone numbers)
+            r'[০-৯]{10}',       # 10 Bengali digits
+            r'[0-9]{10,11}',    # Simple 10-11 digit sequence
+            r'[0-9]{4}[-\s][0-9]{6}',  # Format: 1234-567890 or 1234 567890
+            r'[০-৯]{4}[-\s][০-৯]{6}',  # Bengali format
+            r'মোবাইল.*[০-৯০1]{10,11}',  # Bengali "mobile" with numbers
+            r'ফোন.*[০-৯০1]{10,11}',    # Bengali "phone" with numbers
+            r'mobile.*[০-৯০1]{10,11}',  # English "mobile" mixed
+            r'phone.*[০-৯০1]{10,11}',   # English "phone" mixed
         ]
-        has_phone_number = any(re.search(pattern, full_text) for pattern in phone_patterns)
+        has_phone_number = any(re.search(pattern, full_text, re.IGNORECASE) for pattern in phone_patterns)
         
         # Price patterns (detect prices in multiple formats)
         price_patterns = [

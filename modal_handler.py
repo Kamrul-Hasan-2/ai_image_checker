@@ -186,10 +186,25 @@ class ImageChecker:
             is_product_photo = product_check.get("is_product_photo", False)
             product_photo_confidence = product_check.get("product_score", 0.0)
             
-            # NEW: Check if product title/description matches OCR text
+            # NEW STEP 1: Verify image body content matches expected product
+            # Check if the image actually shows what it's supposed to (e.g., RAM, phone, camera)
+            # This prevents promotional images from being misclassified
+            image_body_match = False
+            body_match_confidence = 0.0
+            
+            if has_title_or_description := bool(title or description):
+                # Use CLIP to verify image content matches product title/description
+                body_verification = self.clip_service.verify_image_body_content(
+                    image, 
+                    title or "", 
+                    description or ""
+                )
+                image_body_match = body_verification.get("body_matches", False)
+                body_match_confidence = body_verification.get("confidence", 0.0)
+            
+            # NEW STEP 2: Check if product title/description matches OCR text
             # If title/description provided but doesn't match OCR = PROMOTIONAL (mismatch)
             is_title_match = False
-            has_title_or_description = bool(title or description)
             title_description_mismatch = False
             
             if has_title_or_description:
@@ -230,6 +245,8 @@ class ImageChecker:
             # FIX: Check if blur check FAILED (not passed) instead of using confidence threshold
             blur_detected = not quality_result['checks']['blur']['passed']
             
+            # Watermark detection is INDEPENDENT of promotional detection
+            # Even product photos can have watermarks (bikroy, daraz, website logos)
             watermark_risk = ocr_risk * watermark_confidence_ocr
             watermark_detected = watermark_risk > 0.2 or watermark_keywords or bd_marketplace
             
@@ -267,12 +284,25 @@ class ImageChecker:
             # ========================================================================
             
             # Promotional detection - RESPECT product title and photo flags
-            # NEW LOGIC: If title/description provided but doesn't match = FORCE PROMOTIONAL
-            # PRIORITY ORDER: product_text_only > title_match > product_photo > signals
+            # NEW LOGIC: Verify image body matches product FIRST, then check promotional signals
+            # PRIORITY ORDER: product_photo > image_body_match > product_text_only > title_match > signals
             promo_risk = promo_confidence_ocr
             
-            # HIGHEST PRIORITY: Product text only (text physically on product body)
-            if is_product_text_only:
+            # HIGHEST PRIORITY: Product photo detection (CLIP-based)
+            # If CLIP detects it's a product photo, text is part of product, NOT promotional
+            if is_product_photo and product_photo_confidence > 0.30:
+                # Product photo = text on product is specs/branding, NOT promotional
+                promotional_detected = False
+                promo_risk = 0.0
+            # SECOND PRIORITY: Image body verification with lower threshold
+            # If image shows the actual product body (e.g., RAM module, phone, camera)
+            # Then text on the image is product labeling, NOT promotional
+            elif image_body_match and body_match_confidence > 0.1:
+                # Image content matches what it should show = product labels, NOT promotional
+                promotional_detected = False
+                promo_risk = 0.0
+            # THIRD PRIORITY: Product text only (text physically on product body)
+            elif is_product_text_only:
                 # Text is PART OF THE PRODUCT (like "INSULATING" on tool, "Canon" on camera)
                 # This is NOT promotional - it's product branding/labeling
                 promotional_detected = False
@@ -308,8 +338,18 @@ class ImageChecker:
             risk_level = min(int(final_risk * 100), 100)
             
             # Calculate promotional text severity (0-10 scale) with visual features
+            # CRITICAL: If product photo detected, promo_score MUST be 0
             promo_score = 0
-            if promotional_detected:
+            
+            # Skip promotional scoring if it's a product photo/body
+            is_confirmed_product = (
+                (is_product_photo and product_photo_confidence > 0.30) or
+                (image_body_match and body_match_confidence > 0.1) or
+                is_product_text_only or
+                is_title_match
+            )
+            
+            if promotional_detected and not is_confirmed_product:
                 # HIGHEST PRIORITY: Title/description mismatch
                 if title_description_mismatch:
                     promo_score = 10  # Maximum score - text doesn't match product info
@@ -343,7 +383,15 @@ class ImageChecker:
                 "promotional_text": 0 if is_exception_category else promo_score,
                 "stock_photo": 0,
                 "watermark": 4 if watermark_detected else 0,
-                "risk_level": risk_level
+                "risk_level": risk_level,
+                # Debug fields
+                "_debug": {
+                    "image_body_match": image_body_match,
+                    "body_match_confidence": body_match_confidence,
+                    "is_product_photo": is_product_photo,
+                    "is_title_match": is_title_match,
+                    "promotional_detected": promotional_detected
+                }
             }
             
         except Exception as e:
