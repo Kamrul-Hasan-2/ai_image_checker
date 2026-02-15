@@ -294,11 +294,11 @@ class ImageChecker:
                 "stock_photo": 0,
                 "watermark": 4 if watermark_detected else 0,
                 "risk_level": max(
-                    (1 if blur_detected else 0),
-                    (1 if screenshot_detected else 0),
-                    (1 if title_description_mismatch else 0),
-                    (promotional_text),
-                    (1 if watermark_detected else 0),
+                    (5 if blur_detected else 0),
+                    (8 if screenshot_detected else 0),
+                    (2 if title_description_mismatch else 0),
+                    (3 if promotional_text else 0),
+                    (4 if watermark_detected else 0),
                 )
             }
             
