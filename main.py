@@ -286,13 +286,13 @@ class ImageChecker:
             
             # Build result
             result = {
-                "blur_image": 1 if blur_detected else 0,
-                "screen_short": 1 if screenshot_detected else 0,
-                "category_mismatch": 1 if title_description_mismatch else 0,
+                "blur_image": 5 if blur_detected else 0,
+                "screen_short": 8 if screenshot_detected else 0,
+                "category_mismatch": 2 if title_description_mismatch else 0,
                 "illegal": 0,
-                "promotional_text": promotional_text,
+                "promotional_text": 3 if promotional_text else 0,
                 "stock_photo": 0,
-                "watermark": 1 if watermark_detected else 0,
+                "watermark": 4 if watermark_detected else 0,
                 "risk_level": max(
                     (1 if blur_detected else 0),
                     (1 if screenshot_detected else 0),
