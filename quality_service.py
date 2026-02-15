@@ -83,8 +83,8 @@ class QualityCheckService:
         screenshot_confidence = checks["screenshot_ui"].get("confidence", 0.0)
         blur_confidence = checks["blur"].get("confidence", 0.0)
         
-        # Hard rule: OpenCV screenshot detection is FINAL
-        opencv_block = screenshot_confidence > 0.7
+        # Hard rule: OpenCV screenshot detection is FINAL - only flag clear mobile UI
+        opencv_block = screenshot_confidence > 0.90
         
         # Determine overall pass/fail
         failed_checks = [name for name, result in checks.items() if not result["passed"]]
@@ -529,8 +529,9 @@ class QualityCheckService:
             }
     
     def _check_screenshot_ui(self, image: Image.Image) -> Dict:
-        """Check if image is likely a screenshot or UI element"""
+        """Check if image is a MOBILE PHONE screenshot by detecting status bar + navbar UI elements"""
         img_array = np.array(image)
+        height, width = img_array.shape[:2]
         
         # Convert to grayscale
         if len(img_array.shape) == 3:
@@ -538,53 +539,252 @@ class QualityCheckService:
         else:
             gray = img_array
         
+        # === 0. ENHANCED PRODUCT PHOTO DETECTION ===
+        # Calculate background uniformity - product photos typically have plain backgrounds
+        blur = cv2.GaussianBlur(gray, (21, 21), 0)
+        background_variance = np.var(blur)
+        
+        # Check corners for white/uniform background
+        corner_size = int(min(height, width) * 0.1)
+        corners = [
+            gray[0:corner_size, 0:corner_size],  # Top-left
+            gray[0:corner_size, -corner_size:],  # Top-right
+            gray[-corner_size:, 0:corner_size],  # Bottom-left
+            gray[-corner_size:, -corner_size:]   # Bottom-right
+        ]
+        corner_means = [np.mean(c) for c in corners]
+        corner_std = np.std(corner_means)
+        avg_corner_brightness = np.mean(corner_means)
+        
+        # Check for centered product (common in product photography)
+        center_region = gray[height//4:3*height//4, width//4:3*width//4]
+        center_mean = np.mean(center_region)
+        border_mean = np.mean([np.mean(gray[:height//4, :]), np.mean(gray[3*height//4:, :]),
+                              np.mean(gray[:, :width//4]), np.mean(gray[:, 3*width//4:])])
+        
+        # Check if center is significantly different from borders (product vs background)
+        center_vs_border_diff = abs(center_mean - border_mean)
+        
+        # Product photo indicators: white/uniform corners OR centered product with plain background
+        is_likely_product_photo = (
+            (avg_corner_brightness > 190 and corner_std < 20 and background_variance < 2500) or
+            (avg_corner_brightness > 180 and corner_std < 30 and background_variance < 3500) or
+            (center_vs_border_diff > 40 and avg_corner_brightness > 170 and corner_std < 40) or
+            (background_variance < 1800 and avg_corner_brightness > 160)
+        )
+        
         # Detect edges
         edges = cv2.Canny(gray, 50, 150)
-        edge_density = np.sum(edges > 0) / edges.size
         
-        # Extremely strict threshold - only flag obvious UI screenshots
-        # Physical product photos with ports/holes should NOT be flagged
-        if edge_density > 0.30:  # More than 30% edges (extremely high)
-            # Check for text-like patterns (screenshots usually have lots of text)
-            # Use horizontal and vertical line detection
-            horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
-            vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
-            horizontal_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, horizontal_kernel)
-            vertical_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, vertical_kernel)
-            
-            line_density = (np.sum(horizontal_lines > 0) + np.sum(vertical_lines > 0)) / edges.size
-            
-            # Additional check: look for MANY rectangular regions
-            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            rectangular_contours = 0
-            for contour in contours:
-                perimeter = cv2.arcLength(contour, True)
-                approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
-                if len(approx) == 4:  # Rectangle
-                    rectangular_contours += 1
-            
-            # Calculate confidence based on line density and rectangles
-            screenshot_confidence = 0.0
-            if line_density > 0.10 and rectangular_contours > 100:
-                screenshot_confidence = min(1.0, (line_density / 0.15) * (rectangular_contours / 150))
-            
-            # Need HIGH line density (UI elements) AND MANY rectangles (>100)
-            if line_density > 0.10 and rectangular_contours > 100:
-                return {
-                    "passed": False,
-                    "reason": "Likely screenshot or UI element",
-                    "details": {
-                        "edge_density": edge_density,
-                        "line_density": line_density,
-                        "rectangles": rectangular_contours
-                    },
-                    "confidence": screenshot_confidence
-                }
+        # Focus on top and bottom regions where navbars typically appear
+        status_bar_height = int(height * 0.08)  # Top 8% for status bar (time, wifi, battery)
+        navbar_height = int(height * 0.15)  # Top/bottom 15% for navbar
+        
+        status_bar_region = edges[:status_bar_height, :]
+        top_region = edges[:navbar_height, :]
+        bottom_region = edges[-navbar_height:, :]
+        
+        # === 1. CHECK STATUS BAR (time, WiFi, network, battery) ===
+        # Look for small icons in the very top region
+        status_bar_contours, _ = cv2.findContours(status_bar_region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        small_icons = 0  # WiFi, signal, battery, time etc
+        icons_at_left = 0  # Left side icons (time)
+        icons_at_right = 0  # Right side icons (battery, wifi, signal)
+        icons_in_center = 0  # Center icons (should be 0 for real status bars)
+        
+        for contour in status_bar_contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            # Very small icons (6-35px) typical of status bar
+            # STRICT: Must be within top 5% of image (not watch dial markers)
+            if 6 < w < 35 and 6 < h < 35 and y < height * 0.05:
+                small_icons += 1
+                # Mobile status bars have icons on BOTH left and right, NOT center
+                if x < width * 0.25:  # Stricter left boundary
+                    icons_at_left += 1
+                elif x > width * 0.75:  # Stricter right boundary
+                    icons_at_right += 1
+                elif width * 0.35 < x < width * 0.65:  # Center region
+                    icons_in_center += 1
+        
+        # Check for text-like patterns in status bar (time display)
+        status_bar_text_density = np.sum(status_bar_region > 0) / status_bar_region.size if status_bar_region.size > 0 else 0
+        
+        # STRICT: Need icons spread across status bar + some text + NO center icons
+        # Watch faces often have center elements, mobile status bars do NOT
+        has_status_bar = (
+            small_icons >= 4 and 
+            icons_at_left >= 2 and 
+            icons_at_right >= 2 and 
+            icons_in_center == 0 and  # Critical: no center icons
+            status_bar_text_density > 0.02 and 
+            status_bar_text_density < 0.15  # Not too dense (would be decorative)
+        )
+        
+        # === 2. DETECT CIRCULAR BUTTONS (O, back arrows, menu dots) ===
+        # UI buttons are typically small circles near edges
+        circles_top = cv2.HoughCircles(
+            gray[:navbar_height, :],
+            cv2.HOUGH_GRADIENT,
+            dp=1,
+            minDist=20,
+            param1=50,
+            param2=25,
+            minRadius=8,
+            maxRadius=40  # Reduced max - UI buttons are smaller
+        )
+        
+        circles_bottom = cv2.HoughCircles(
+            gray[-navbar_height:, :],
+            cv2.HOUGH_GRADIENT,
+            dp=1,
+            minDist=20,
+            param1=50,
+            param2=25,
+            minRadius=8,
+            maxRadius=40
+        )
+        
+        # Filter circles: only count if near left/right edges (where UI buttons actually are)
+        navbar_buttons_top = 0
+        if circles_top is not None:
+            for circle in circles_top[0]:
+                x = circle[0]
+                # UI buttons are at edges, not center (more lenient: 30% from edges)
+                if x < width * 0.3 or x > width * 0.7:
+                    navbar_buttons_top += 1
+        
+        navbar_buttons_bottom = 0
+        if circles_bottom is not None:
+            for circle in circles_bottom[0]:
+                x = circle[0]
+                if x < width * 0.3 or x > width * 0.7:
+                    navbar_buttons_bottom += 1
+        
+        navbar_buttons_total = navbar_buttons_top + navbar_buttons_bottom
+        
+        # === 3. DETECT HORIZONTAL LINES (navbar separators) ===
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 1))
+        top_lines = cv2.morphologyEx(top_region, cv2.MORPH_OPEN, horizontal_kernel)
+        bottom_lines = cv2.morphologyEx(bottom_region, cv2.MORPH_OPEN, horizontal_kernel)
+        
+        has_top_line = np.sum(top_lines > 0) > (width * 0.25)  # 25% of width
+        has_bottom_line = np.sum(bottom_lines > 0) > (width * 0.25)
+        
+        # === 4. DETECT SMALL UI BUTTONS (X, ✓, share, bookmark, menu) ===
+        contours_top, _ = cv2.findContours(top_region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours_bottom, _ = cv2.findContours(bottom_region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        small_buttons_top = 0
+        buttons_near_edge_top = 0
+        
+        for contour in contours_top:
+            x, y, w, h = cv2.boundingRect(contour)
+            # Small buttons (15-50px) - includes icons like X, share, menu
+            if 15 < w < 50 and 15 < h < 50 and 0.4 < (w/h) < 2.5:
+                small_buttons_top += 1
+                # Check if near edges (more lenient: 30% from edges)
+                if x < width * 0.3 or x > width * 0.7:
+                    buttons_near_edge_top += 1
+        
+        small_buttons_bottom = 0
+        buttons_near_edge_bottom = 0
+        
+        for contour in contours_bottom:
+            x, y, w, h = cv2.boundingRect(contour)
+            if 15 < w < 50 and 15 < h < 50 and 0.4 < (w/h) < 2.5:
+                small_buttons_bottom += 1
+                if x < width * 0.3 or x > width * 0.7:
+                    buttons_near_edge_bottom += 1
+        
+        # === 5. PRODUCT PHOTO CHECK (EARLY EXIT) ===
+        # Product photos with white backgrounds OR centered products are NOT screenshots
+        if is_likely_product_photo:
+            return {
+                "passed": True,
+                "reason": "Product photo detected - not a screenshot",
+                "details": {
+                    "is_product_photo": True,
+                    "avg_corner_brightness": avg_corner_brightness,
+                    "corner_uniformity": corner_std,
+                    "center_vs_border_diff": center_vs_border_diff,
+                    "background_variance": background_variance
+                },
+                "confidence": 0.0
+            }
+        
+        # === 6. CALCULATE SCREENSHOT CONFIDENCE ===
+        # ONLY flag as screenshot if we have CLEAR mobile phone UI patterns
+        screenshot_confidence = 0.0
+        navbar_detected = False
+        detection_reasons = []
+        
+        # VERY STRICT: Must have actual status bar with icons on BOTH sides AND no center icons
+        # This prevents product photos (especially watches) from being falsely detected
+        has_actual_status_bar = (
+            has_status_bar and 
+            icons_at_left >= 2 and 
+            icons_at_right >= 2 and 
+            icons_in_center == 0
+        )
+        
+        # Pattern 1: Perfect status bar + navbar buttons (STRONGEST PATTERN)
+        if has_actual_status_bar and navbar_buttons_total >= 3:
+            screenshot_confidence = 0.95
+            navbar_detected = True
+            detection_reasons.append("mobile_screenshot_with_navbar")
+        
+        # Pattern 2: Perfect status bar + top AND bottom UI elements (VERY STRONG)
+        elif has_actual_status_bar and buttons_near_edge_top >= 2 and buttons_near_edge_bottom >= 2:
+            screenshot_confidence = 0.95
+            navbar_detected = True
+            detection_reasons.append("mobile_screenshot_full_ui")
+        
+        # Pattern 3: Perfect status bar + clear UI buttons at edges (both top and bottom)
+        elif has_actual_status_bar and buttons_near_edge_top >= 3 and buttons_near_edge_bottom >= 2:
+            screenshot_confidence = 0.92
+            navbar_detected = True
+            detection_reasons.append("mobile_ui_with_buttons")
+        
+        # Pattern 4: Perfect status bar detection alone (with VERY strict criteria)
+        elif has_actual_status_bar and small_icons >= 6 and navbar_buttons_total >= 2:
+            screenshot_confidence = 0.92
+            navbar_detected = True
+            detection_reasons.append("confirmed_mobile_status_bar")
+        
+        # THRESHOLD: Only flag if we're very confident it's a mobile screenshot (>0.90)
+        if navbar_detected and screenshot_confidence > 0.90:
+            return {
+                "passed": False,
+                "reason": f"Mobile screenshot detected - {', '.join(detection_reasons)}",
+                "details": {
+                    "has_status_bar": has_status_bar,
+                    "has_actual_status_bar": has_actual_status_bar,
+                    "status_bar_icons": small_icons,
+                    "icons_at_left": icons_at_left,
+                    "icons_at_right": icons_at_right,
+                    "icons_in_center": icons_in_center,
+                    "circular_buttons_at_edges": navbar_buttons_total,
+                    "buttons_near_edge_top": buttons_near_edge_top,
+                    "buttons_near_edge_bottom": buttons_near_edge_bottom,
+                    "top_line": has_top_line,
+                    "bottom_line": has_bottom_line
+                },
+                "confidence": screenshot_confidence
+            }
         
         return {
             "passed": True,
-            "reason": "Not a screenshot",
-            "details": {"edge_density": edge_density},
+            "reason": "No mobile UI detected - not a screenshot",
+            "details": {
+                "status_bar_icons": small_icons,
+                "icons_at_left": icons_at_left,
+                "icons_at_right": icons_at_right,
+                "icons_in_center": icons_in_center,
+                "circular_buttons": navbar_buttons_total,
+                "small_buttons_top": small_buttons_top,
+                "buttons_near_edge": buttons_near_edge_top + buttons_near_edge_bottom,
+                "is_product_photo": is_likely_product_photo
+            },
             "confidence": 0.0
         }
     

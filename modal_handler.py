@@ -124,7 +124,7 @@ class ImageChecker:
         except Exception as e:
             raise ValueError(f"Failed to load image: {str(e)}")
     
-    def process_single_image(self, image_input: str, category: str, pipeline_mode: str, title: str = None, description: str = None) -> Dict[str, Any]:
+    def process_single_image(self, image_input: str, category: str, pipeline_mode: str, title: str = None, description: str = None, image_id: int = None, position_id: int = None) -> Dict[str, Any]:
         """
         Process a single image through the AI pipeline
         
@@ -134,6 +134,8 @@ class ImageChecker:
             pipeline_mode: Processing mode (full/fast)
             title: Optional product title to match against OCR text
             description: Optional product description to match against OCR text
+            image_id: Optional image ID to include in response
+            position_id: Optional position ID to include in response
         """
         # Exception categories where promotional_text is always 0
         exception_categories = [
@@ -240,8 +242,8 @@ class ImageChecker:
             qwen_watermark_score = 0.0
             qwen_illegal_score = 0.0
             
-            # Calculate final scores
-            screenshot_detected = screenshot_confidence > 0.7
+            # Calculate final scores - only flag clear mobile UI screenshots
+            screenshot_detected = screenshot_confidence > 0.90
             # FIX: Check if blur check FAILED (not passed) instead of using confidence threshold
             blur_detected = not quality_result['checks']['blur']['passed']
             
@@ -375,7 +377,17 @@ class ImageChecker:
                 else:
                     promo_score = 3  # Low but detected
             
-            return {
+            # Build result with id and position_id first (if provided)
+            result = {}
+            
+            # Add id and position_id at the beginning if provided
+            if image_id is not None:
+                result["id"] = image_id
+            if position_id is not None:
+                result["position_id"] = position_id
+            
+            # Add the rest of the fields
+            result.update({
                 "blur_image": 5 if blur_detected else 0,
                 "screen_short": 8 if screenshot_detected else 0,
                 "category_mismatch": 0,
@@ -392,10 +404,22 @@ class ImageChecker:
                     "is_title_match": is_title_match,
                     "promotional_detected": promotional_detected
                 }
-            }
+            })
+            
+            return result
             
         except Exception as e:
-            return {
+            # Build error result with id and position_id first (if provided)
+            error_result = {}
+            
+            # Add id and position_id at the beginning if provided
+            if image_id is not None:
+                error_result["id"] = image_id
+            if position_id is not None:
+                error_result["position_id"] = position_id
+            
+            # Add the rest of the error fields
+            error_result.update({
                 "error": str(e),
                 "blur_image": 0,
                 "screen_short": 0,
@@ -405,7 +429,9 @@ class ImageChecker:
                 "stock_photo": 0,
                 "watermark": 0,
                 "risk_level": 0
-            }
+            })
+            
+            return error_result
     
     @modal.method()
     def check_image(self, job_input: Dict[str, Any]) -> Dict[str, Any]:
@@ -434,11 +460,24 @@ class ImageChecker:
                     category = img_data.get("category", common_category)
                     title = img_data.get("title", common_title)
                     description = img_data.get("description", common_description)
+                    # Extract id and position_id if provided
+                    image_id = img_data.get("id")
+                    position_id = img_data.get("position_id")
                     
                     if not image_input:
-                        results.append({"error": "No image URL provided", "risk_level": 0})
+                        # Build error result with id and position_id first (if provided)
+                        error_result = {}
+                        if image_id is not None:
+                            error_result["id"] = image_id
+                        if position_id is not None:
+                            error_result["position_id"] = position_id
+                        error_result.update({
+                            "error": "No image URL provided",
+                            "risk_level": 0
+                        })
+                        results.append(error_result)
                     else:
-                        result = self.process_single_image(image_input, category, pipeline_mode, title, description)
+                        result = self.process_single_image(image_input, category, pipeline_mode, title, description, image_id, position_id)
                         results.append(result)
                 
                 return results
@@ -449,11 +488,13 @@ class ImageChecker:
                 category = job_input.get("category", "unknown")
                 title = job_input.get("title")  # Optional product title
                 description = job_input.get("description")  # Optional product description
+                image_id = job_input.get("id")  # Optional image ID
+                position_id = job_input.get("position_id")  # Optional position ID
                 
                 if not image_input:
                     return {"error": "No image provided"}
                 
-                return self.process_single_image(image_input, category, pipeline_mode, title, description)
+                return self.process_single_image(image_input, category, pipeline_mode, title, description, image_id, position_id)
             
         except Exception as e:
             return {
