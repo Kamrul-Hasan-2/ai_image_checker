@@ -492,10 +492,9 @@ async def health_check():
     }
 
 
-@app.get("/")
 @app.get("/image_checker")
 async def root():
-    """Root endpoint"""
+    """Info endpoint - only accessible at /image_checker"""
     return {
         "name": "AI Image Checker",
         "version": "1.0.0",
