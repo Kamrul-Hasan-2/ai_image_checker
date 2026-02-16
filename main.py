@@ -310,9 +310,9 @@ class ImageChecker:
             
             print(f"\n📊 FINAL RESULT:")
             print(f"   blur: {5 if blur_detected else 0}, screenshot: {8 if screenshot_detected else 0}")
-            print(f"   category_mismatch: {2 if title_description_mismatch else 0}, promotional: {3 if promotional_text else 0}")
+            print(f"   category_mismatch: 0, promotional: {3 if promotional_text else 0}")
             print(f"   watermark: {4 if watermark_detected else 0}")
-            print(f"   risk_level: {max((5 if blur_detected else 0), (8 if screenshot_detected else 0), (2 if title_description_mismatch else 0), (3 if promotional_text else 0), (4 if watermark_detected else 0))}")
+            print(f"   risk_level: {max((5 if blur_detected else 0), (8 if screenshot_detected else 0), (3 if promotional_text else 0), (4 if watermark_detected else 0))}")
             print()
             
             # Build result
@@ -327,7 +327,6 @@ class ImageChecker:
                 "risk_level": max(
                     (5 if blur_detected else 0),
                     (8 if screenshot_detected else 0),
-                    (2 if title_description_mismatch else 0),
                     (3 if promotional_text else 0),
                     (4 if watermark_detected else 0),
                 )
