@@ -98,14 +98,21 @@ class ImageChecker:
         
         is_exception_category = category.lower().strip() in exception_categories
         
+        debug_info = {}
+        
         try:
+            print(f"\n🔍 Processing image (ID: {image_id}, Position: {position_id})")
+            print(f"   Category: {category}, Title: {title}, Description: {description}")
+            
             image = self.load_image(image_input)
+            print(f"✅ Image loaded: {image.size}")
             
             # CRITICAL: Quality check BEFORE resizing - blur detection needs full resolution
             quality_result = self.quality_service.check_image(image)
             opencv_risk = quality_result.get("opencv_risk", 0.0)
             screenshot_confidence = quality_result.get("screenshot_confidence", 0.0)
             blur_confidence = quality_result.get("blur_confidence", 0.0)
+            print(f"✅ Quality check done - blur: {blur_confidence:.2f}, screenshot: {screenshot_confidence:.2f}")
             
             # Resize for optimal OCR/CLIP processing (balance speed vs accuracy)
             # Note: Quality check done BEFORE resize to preserve blur detection accuracy
@@ -127,6 +134,8 @@ class ImageChecker:
             has_ecommerce_ui = ocr_result.get("has_ecommerce_ui", False)
             promotional_detected_ocr = ocr_result.get("promotional_detected", False)
             
+            print(f"✅ OCR done - text: {ocr_result.get('full_text', '')[:50]}..., promo conf: {promo_confidence_ocr:.2f}")
+            
             # NEW: Visual promo indicators
             visual_promo_score = ocr_result.get("visual_promo_score", 0.0)
             strong_price_indicator = ocr_result.get("strong_price_indicator", False)
@@ -138,6 +147,7 @@ class ImageChecker:
             product_check = self.clip_service.detect_product_photo(image)
             is_product_photo = product_check.get("is_product_photo", False)
             product_photo_confidence = product_check.get("product_score", 0.0)
+            print(f"✅ CLIP product check: is_product_photo={is_product_photo}, conf={product_photo_confidence:.2f}")
             
             # NEW STEP 1: Verify image body content matches expected product
             # Check if the image actually shows what it's supposed to (e.g., RAM, phone, camera)
@@ -154,6 +164,7 @@ class ImageChecker:
                 )
                 image_body_match = body_verification.get("body_matches", False)
                 body_match_confidence = body_verification.get("confidence", 0.0)
+                print(f"✅ Body verification: matches={image_body_match}, conf={body_match_confidence:.2f}")
             
             # NEW STEP 2: Check if product title/description matches OCR text
             # If title/description provided but doesn't match OCR = PROMOTIONAL (mismatch)
@@ -180,9 +191,14 @@ class ImageChecker:
                     match_ratio = matched_words / len(product_words)
                     is_title_match = match_ratio >= 0.6
                     
+                    print(f"✅ Title match: {is_title_match} ({matched_words}/{len(product_words)} words matched)")
+                    print(f"   OCR text: {full_text[:50]}...")
+                    print(f"   Product words: {product_words}")
+                    
                     # If title/description provided but doesn't match OCR = MISMATCH
                     if not is_title_match and len(full_text) > 10:  # Only if OCR has meaningful text
                         title_description_mismatch = True
+                        print(f"⚠️  Title/Description MISMATCH detected")
             
             # CLIP analysis (skipped for speed - can be enabled if needed)
             clip_risk = 0.0
@@ -247,24 +263,28 @@ class ImageChecker:
                 # Product photo = text on product is specs/branding, NOT promotional
                 promotional_detected = False
                 promo_risk = 0.0
+                print(f"✅ Promotional check: PRODUCT PHOTO detected → NOT promotional")
             # SECOND PRIORITY: Image body verification with lower threshold
             # If image shows the actual product body (e.g., RAM module, phone, camera)
             elif image_body_match and body_match_confidence > 0.20:
                 # Product body shown = text is definitely product specs, NOT promotional
                 promotional_detected = False
                 promo_risk = 0.0
+                print(f"✅ Promotional check: BODY MATCH detected → NOT promotional")
             # THIRD PRIORITY: Product text-only detection (OCR-based)
             # If text has absolutely NO promotional signals (no price, no phone, no UI)
             elif is_product_text_only:
                 # No promotional signals = safe to assume it's product info
                 promotional_detected = False
                 promo_risk = 0.0
+                print(f"✅ Promotional check: PRODUCT TEXT ONLY → NOT promotional")
             # FOURTH PRIORITY: Title/Description matching
             # If product title/description provided AND matches OCR text
             elif is_title_match and not title_description_mismatch:
                 # Title matches = text is product name/specs, NOT promotional
                 promotional_detected = False
                 promo_risk = 0.0
+                print(f"✅ Promotional check: TITLE MATCH → NOT promotional")
             # FALLBACK: Multi-signal promotional detection
             else:
                 # Use multi-signal detection
@@ -275,6 +295,10 @@ class ImageChecker:
                     has_button_ui
                 ) or promotional_detected_ocr
                 
+                print(f"✅ Promotional check: MULTI-SIGNAL detection")
+                print(f"   price={has_price}, phone={has_phone_number}, ecom_ui={has_ecommerce_ui}, button_ui={has_button_ui}, ocr_promo={promotional_detected_ocr}")
+                print(f"   Result: promotional_detected={promotional_detected}")
+                
                 # Higher risk if multiple signals
                 if has_price and has_phone_number:
                     promo_risk = min(0.9, promo_risk + 0.3)
@@ -283,6 +307,13 @@ class ImageChecker:
             
             # Set promotional_text to 0 for exception categories
             promotional_text = 0 if is_exception_category else (1 if promotional_detected else 0)
+            
+            print(f"\n📊 FINAL RESULT:")
+            print(f"   blur: {5 if blur_detected else 0}, screenshot: {8 if screenshot_detected else 0}")
+            print(f"   category_mismatch: {2 if title_description_mismatch else 0}, promotional: {3 if promotional_text else 0}")
+            print(f"   watermark: {4 if watermark_detected else 0}")
+            print(f"   risk_level: {max((5 if blur_detected else 0), (8 if screenshot_detected else 0), (2 if title_description_mismatch else 0), (3 if promotional_text else 0), (4 if watermark_detected else 0))}")
+            print()
             
             # Build result
             result = {
@@ -322,6 +353,10 @@ class ImageChecker:
             
         except Exception as e:
             # Build error result with id and position_id first (if provided)
+            print(f"❌ ERROR processing image: {str(e)}")
+            import traceback as tb
+            print(tb.format_exc())
+            
             error_result = {}
             
             # Add id and position_id at the beginning if provided
