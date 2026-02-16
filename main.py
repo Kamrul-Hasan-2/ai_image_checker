@@ -27,8 +27,7 @@ from qwen_service import Qwen2VLService
 # Create FastAPI app
 app = FastAPI(
     title="AI Image Checker", 
-    version="1.0.0",
-    root_path="/image_checker"
+    version="1.0.0"
 )
 
 # Global service instances
@@ -463,7 +462,8 @@ async def startup_event():
 
 
 # API Endpoints
-@app.post("/")
+@app.post("/image_checker")
+@app.post("/image_checker/")
 async def process_image(data: Dict[str, Any]):
     """HTTP endpoint to check images"""
     if image_checker is None:
@@ -472,7 +472,7 @@ async def process_image(data: Dict[str, Any]):
     return image_checker.check_image(data)
 
 
-@app.post("/check")
+@app.post("/image_checker/check")
 async def check_endpoint(data: Dict[str, Any]):
     """Alternative /check endpoint"""
     if image_checker is None:
@@ -481,7 +481,7 @@ async def check_endpoint(data: Dict[str, Any]):
     return image_checker.check_image(data)
 
 
-@app.get("/health")
+@app.get("/image_checker/health")
 async def health_check():
     """Health check endpoint"""
     return {
@@ -493,6 +493,7 @@ async def health_check():
 
 
 @app.get("/")
+@app.get("/image_checker")
 async def root():
     """Root endpoint"""
     return {
