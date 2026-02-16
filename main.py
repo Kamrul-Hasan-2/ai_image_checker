@@ -319,7 +319,7 @@ class ImageChecker:
             result = {
                 "blur_image": 5 if blur_detected else 0,
                 "screen_short": 8 if screenshot_detected else 0,
-                "category_mismatch": 2 if title_description_mismatch else 0,
+                "category_mismatch":  0,
                 "illegal": 0,
                 "promotional_text": 3 if promotional_text else 0,
                 "stock_photo": 0,
