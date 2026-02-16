@@ -25,7 +25,11 @@ from clip_service import CLIPService
 from qwen_service import Qwen2VLService
 
 # Create FastAPI app
-app = FastAPI(title="AI Image Checker", version="1.0.0")
+app = FastAPI(
+    title="AI Image Checker", 
+    version="1.0.0",
+    root_path="/image_checker"
+)
 
 # Global service instances
 image_checker = None
@@ -495,9 +499,9 @@ async def root():
         "name": "AI Image Checker",
         "version": "1.0.0",
         "endpoints": {
-            "POST /": "Check images",
-            "POST /check": "Alternative check endpoint",
-            "GET /health": "Health check"
+            "POST /image_checker/": "Check images",
+            "POST /image_checker/check": "Alternative check endpoint",
+            "GET /image_checker/health": "Health check"
         },
         "example": {
             "images": [
@@ -529,8 +533,8 @@ def main():
     print(f"Starting server on {args.host}:{args.port}")
     print(f"Workers: {args.workers}")
     print("\nAPI Documentation:")
-    print(f"  - POST http://{args.host}:{args.port}/ - Check images")
-    print(f"  - GET  http://{args.host}:{args.port}/health - Health check")
+    print(f"  - POST http://{args.host}:{args.port}/image_checker/ - Check images")
+    print(f"  - GET  http://{args.host}:{args.port}/image_checker/health - Health check")
     print("="*60)
     
     uvicorn.run(
