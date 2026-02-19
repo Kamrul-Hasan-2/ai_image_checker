@@ -16,7 +16,7 @@ class QualityCheckService:
         self.max_resolution = 10000  # maximum width/height
         self.min_aspect_ratio = 0.2  # 1:5
         self.max_aspect_ratio = 5.0  # 5:1
-        self.blur_threshold = 65.0  # Laplacian variance threshold (balanced)
+        self.blur_threshold = 75.0  # Laplacian variance threshold (moderate - catches slight blur)
         self.min_filesize = 1024  # 1KB minimum
         
         print("Quality Check Service initialized")
@@ -302,16 +302,16 @@ class QualityCheckService:
         if is_motion_blurred:
             motion_blur_penalty = 25  # BALANCED penalty for motion blur
         
-        # Severe blur penalty (very low Laplacian) - BALANCED
+        # Severe blur penalty (very low Laplacian) - AGGRESSIVE
         severe_blur_penalty = 0
-        if laplacian_var < 60:  # Extremely blurry
-            severe_blur_penalty = 35  # BALANCED penalty
-        elif laplacian_var < 150:  # Very blurry
-            severe_blur_penalty = 25  # BALANCED penalty
-        elif laplacian_var < 300:  # Moderate blur
-            severe_blur_penalty = 16
-        elif laplacian_var < 450:  # Subtle blur
-            severe_blur_penalty = 10
+        if laplacian_var < 80:  # Extremely blurry - stricter
+            severe_blur_penalty = 40  # Higher penalty
+        elif laplacian_var < 180:  # Very blurry - stricter
+            severe_blur_penalty = 30  # Higher penalty
+        elif laplacian_var < 350:  # Moderate blur - stricter
+            severe_blur_penalty = 20
+        elif laplacian_var < 500:  # Subtle blur - stricter
+            severe_blur_penalty = 14
         
         # Poor contrast penalty (BALANCED)
         contrast_penalty = 0
@@ -367,39 +367,39 @@ class QualityCheckService:
         # Apply ALL penalties (now includes combined quality penalty)
         combined_score = max(0, combined_score - noise_penalty - detail_penalty - motion_blur_penalty - severe_blur_penalty - contrast_penalty - combined_quality_penalty)
         
-        # HARD REJECTION - BALANCED to catch real blur without false positives
-        # Catch genuinely blurry/poor quality images only
+        # HARD REJECTION - AGGRESSIVE to catch slight blur
+        # Stricter thresholds to catch borderline blurry images
         hard_reject = (
-            laplacian_var < 50 or  # Extremely low sharpness - truly blurry
-            detail_loss_3x3 < 0.5 or  # Almost no detail - severe blur
-            wavelet_energy < 5 or  # Very low detail energy - severe
-            (is_motion_blurred and laplacian_var < 150) or  # Clear motion blur
-            (laplacian_var < 100 and detail_loss_3x3 < 1.0) or  # Combined severe indicators
-            (laplacian_var < 250 and detail_loss_3x3 < 1.5 and not is_product_photo_layout) or  # Regular blur
-            (edge_density < 0.015 and not is_product_photo_layout) or  # Very few edges
-            (edge_density < 0.03 and laplacian_var < 200 and not is_product_photo_layout) or  # Low edges + blur
-            (is_noisy and laplacian_var < 120) or  # Noisy + low sharpness
-            snr < 1.0 or  # Extremely poor signal
-            (is_noisy and snr < 3.0 and laplacian_var < 150) or  # Noisy + poor SNR
-            (noise_score > 300 and laplacian_var < 250) or  # Extreme noise
-            (tenengrad_score < 200 and laplacian_var < 250 and not is_product_photo_layout) or  # Low gradient
-            (wavelet_energy < 7 and laplacian_var < 300) or  # Low detail energy
-            (gradient_std < 10 and laplacian_var < 250) or  # Very low gradient variation
-            (contrast < 20 and laplacian_var < 300)  # Very low contrast + blur
+            laplacian_var < 70 or  # Extremely low sharpness - stricter
+            detail_loss_3x3 < 0.6 or  # Almost no detail - stricter
+            wavelet_energy < 6 or  # Very low detail energy - stricter
+            (is_motion_blurred and laplacian_var < 180) or  # Clear motion blur - stricter
+            (laplacian_var < 120 and detail_loss_3x3 < 1.2) or  # Combined severe indicators - stricter
+            (laplacian_var < 300 and detail_loss_3x3 < 1.8 and not is_product_photo_layout) or  # Regular blur - stricter
+            (edge_density < 0.02 and not is_product_photo_layout) or  # Very few edges - stricter
+            (edge_density < 0.04 and laplacian_var < 250 and not is_product_photo_layout) or  # Low edges + blur - stricter
+            (is_noisy and laplacian_var < 150) or  # Noisy + low sharpness - stricter
+            snr < 1.5 or  # Extremely poor signal - stricter
+            (is_noisy and snr < 3.5 and laplacian_var < 180) or  # Noisy + poor SNR - stricter
+            (noise_score > 280 and laplacian_var < 280) or  # Extreme noise - stricter
+            (tenengrad_score < 250 and laplacian_var < 300 and not is_product_photo_layout) or  # Low gradient - stricter
+            (wavelet_energy < 8 and laplacian_var < 350) or  # Low detail energy - stricter
+            (gradient_std < 12 and laplacian_var < 280) or  # Very low gradient variation - stricter
+            (contrast < 25 and laplacian_var < 350)  # Very low contrast + blur - stricter
         )
         
         if hard_reject:
             combined_score = 0  # Force rejection
         
-        # BALANCED THRESHOLDS - Catch real blur, not good images
-        # < 68: Poor quality (REJECT) - Genuinely blurry
-        # 68-78: Borderline quality - Some issues
-        # 78+: Acceptable (good quality)
-        is_blurry = combined_score < 68
-        is_borderline = 68 <= combined_score < 78
+        # AGGRESSIVE THRESHOLDS - Catch slight blur more strictly
+        # < 76: Poor quality (REJECT) - Includes slightly blurry images
+        # 76-84: Borderline quality - Some issues
+        # 84+: Acceptable (good quality)
+        is_blurry = combined_score < 76
+        is_borderline = 76 <= combined_score < 84
         
         # Calculate confidence (0.0 to 1.0) - lower score = higher blur confidence
-        blur_confidence = max(0.0, min(1.0, (78 - combined_score) / 78)) if combined_score < 78 else 0.0
+        blur_confidence = max(0.0, min(1.0, (84 - combined_score) / 84)) if combined_score < 84 else 0.0
         
         # Determine failure reason with detailed diagnosis
         quality_issues = []
@@ -411,14 +411,14 @@ class QualityCheckService:
             quality_issues.append("poor signal quality")
         if is_motion_blurred:
             quality_issues.append("motion blur detected")
-        if laplacian_var < 60:
+        if laplacian_var < 80:
             quality_issues.append("extremely blurry")
-        elif laplacian_var < 120:
+        elif laplacian_var < 150:
             quality_issues.append("severely blurry")
-        elif laplacian_var < 250:
+        elif laplacian_var < 300:
             quality_issues.append("very blurry")
-        elif laplacian_var < 400:
-            quality_issues.append("blurry")
+        elif laplacian_var < 500:
+            quality_issues.append("slightly blurry")
         if is_noisy:
             quality_issues.append("noisy/grainy")
         if detail_loss_3x3 < 0.8:
