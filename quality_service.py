@@ -304,14 +304,14 @@ class QualityCheckService:
         
         # Severe blur penalty (very low Laplacian) - AGGRESSIVE
         severe_blur_penalty = 0
-        if laplacian_var < 80:  # Extremely blurry - stricter
-            severe_blur_penalty = 40  # Higher penalty
-        elif laplacian_var < 180:  # Very blurry - stricter
-            severe_blur_penalty = 30  # Higher penalty
-        elif laplacian_var < 350:  # Moderate blur - stricter
-            severe_blur_penalty = 20
-        elif laplacian_var < 500:  # Subtle blur - stricter
-            severe_blur_penalty = 14
+        if laplacian_var < 100:  # Extremely blurry - stricter
+            severe_blur_penalty = 45  # Higher penalty
+        elif laplacian_var < 200:  # Very blurry - stricter
+            severe_blur_penalty = 35  # Higher penalty
+        elif laplacian_var < 400:  # Moderate blur - stricter
+            severe_blur_penalty = 25
+        elif laplacian_var < 600:  # Subtle blur - stricter
+            severe_blur_penalty = 18
         
         # Poor contrast penalty (BALANCED)
         contrast_penalty = 0
@@ -370,36 +370,36 @@ class QualityCheckService:
         # HARD REJECTION - AGGRESSIVE to catch slight blur
         # Stricter thresholds to catch borderline blurry images
         hard_reject = (
-            laplacian_var < 70 or  # Extremely low sharpness - stricter
-            detail_loss_3x3 < 0.6 or  # Almost no detail - stricter
-            wavelet_energy < 6 or  # Very low detail energy - stricter
-            (is_motion_blurred and laplacian_var < 180) or  # Clear motion blur - stricter
-            (laplacian_var < 120 and detail_loss_3x3 < 1.2) or  # Combined severe indicators - stricter
-            (laplacian_var < 300 and detail_loss_3x3 < 1.8 and not is_product_photo_layout) or  # Regular blur - stricter
-            (edge_density < 0.02 and not is_product_photo_layout) or  # Very few edges - stricter
-            (edge_density < 0.04 and laplacian_var < 250 and not is_product_photo_layout) or  # Low edges + blur - stricter
-            (is_noisy and laplacian_var < 150) or  # Noisy + low sharpness - stricter
-            snr < 1.5 or  # Extremely poor signal - stricter
-            (is_noisy and snr < 3.5 and laplacian_var < 180) or  # Noisy + poor SNR - stricter
-            (noise_score > 280 and laplacian_var < 280) or  # Extreme noise - stricter
-            (tenengrad_score < 250 and laplacian_var < 300 and not is_product_photo_layout) or  # Low gradient - stricter
-            (wavelet_energy < 8 and laplacian_var < 350) or  # Low detail energy - stricter
-            (gradient_std < 12 and laplacian_var < 280) or  # Very low gradient variation - stricter
-            (contrast < 25 and laplacian_var < 350)  # Very low contrast + blur - stricter
+            laplacian_var < 80 or  # Extremely low sharpness - stricter
+            detail_loss_3x3 < 0.7 or  # Almost no detail - stricter
+            wavelet_energy < 7 or  # Very low detail energy - stricter
+            (is_motion_blurred and laplacian_var < 200) or  # Clear motion blur - stricter
+            (laplacian_var < 140 and detail_loss_3x3 < 1.4) or  # Combined severe indicators - stricter
+            (laplacian_var < 350 and detail_loss_3x3 < 2.0 and not is_product_photo_layout) or  # Regular blur - stricter
+            (edge_density < 0.025 and not is_product_photo_layout) or  # Very few edges - stricter
+            (edge_density < 0.05 and laplacian_var < 300 and not is_product_photo_layout) or  # Low edges + blur - stricter
+            (is_noisy and laplacian_var < 170) or  # Noisy + low sharpness - stricter
+            snr < 1.8 or  # Extremely poor signal - stricter
+            (is_noisy and snr < 4.0 and laplacian_var < 200) or  # Noisy + poor SNR - stricter
+            (noise_score > 280 and laplacian_var < 320) or  # Extreme noise - stricter
+            (tenengrad_score < 280 and laplacian_var < 350 and not is_product_photo_layout) or  # Low gradient - stricter
+            (wavelet_energy < 9 and laplacian_var < 400) or  # Low detail energy - stricter
+            (gradient_std < 13 and laplacian_var < 320) or  # Very low gradient variation - stricter
+            (contrast < 28 and laplacian_var < 400)  # Very low contrast + blur - stricter
         )
         
         if hard_reject:
             combined_score = 0  # Force rejection
         
         # AGGRESSIVE THRESHOLDS - Catch slight blur more strictly
-        # < 76: Poor quality (REJECT) - Includes slightly blurry images
-        # 76-84: Borderline quality - Some issues
-        # 84+: Acceptable (good quality)
-        is_blurry = combined_score < 76
-        is_borderline = 76 <= combined_score < 84
+        # < 78: Poor quality (REJECT) - Includes slightly blurry images
+        # 78-85: Borderline quality - Some issues
+        # 85+: Acceptable (good quality)
+        is_blurry = combined_score < 78
+        is_borderline = 78 <= combined_score < 85
         
         # Calculate confidence (0.0 to 1.0) - lower score = higher blur confidence
-        blur_confidence = max(0.0, min(1.0, (84 - combined_score) / 84)) if combined_score < 84 else 0.0
+        blur_confidence = max(0.0, min(1.0, (85 - combined_score) / 85)) if combined_score < 85 else 0.0
         
         # Determine failure reason with detailed diagnosis
         quality_issues = []
