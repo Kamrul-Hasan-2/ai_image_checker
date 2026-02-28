@@ -143,6 +143,7 @@ class ImageChecker:
             visual_promo_score = ocr_result.get("visual_promo_score", 0.0)
             strong_price_indicator = ocr_result.get("strong_price_indicator", False)
             has_button_ui = ocr_result.get("has_button_ui", False)
+            has_promotional_sticker = ocr_result.get("has_promotional_sticker", False)
             digit_count = ocr_result.get("digit_count", 0)
             
             # CRITICAL: Check if image shows actual product (using CLIP)
@@ -260,13 +261,30 @@ class ImageChecker:
             # PRIORITY ORDER: product_photo > image_body_match > product_text_only > title_match > signals
             promo_risk = promo_confidence_ocr
             
+            # Check for VERY STRONG promotional signals first (overrides everything)
+            # These are clear promotional indicators that should be detected even on product photos
+            very_strong_promo = (
+                (has_phone_number and has_price) or  # Phone + price = clear promo
+                (has_phone_number and has_link) or   # Phone + website = clear promo  
+                (has_ecommerce_ui and has_price) or  # E-commerce UI + price = clear promo
+                (has_button_ui and has_phone_number) or  # Buttons + phone = clear promo
+                (has_price and has_link and len(ocr_result.get('full_text', '')) > 20) or  # Price + link + substantial text
+                has_promotional_sticker  # Promotional sticker detected on product
+            )
+            
             # HIGHEST PRIORITY: Product photo detection (CLIP-based)
             # If CLIP detects it's a product photo, text is part of product, NOT promotional
-            if is_product_photo and product_photo_confidence > 0.30:
+            # EXCEPTION: Still flag if very strong promotional signals detected
+            if is_product_photo and product_photo_confidence > 0.30 and not very_strong_promo:
                 # Product photo = text on product is specs/branding, NOT promotional
                 promotional_detected = False
                 promo_risk = 0.0
                 print(f"✅ Promotional check: PRODUCT PHOTO detected → NOT promotional")
+            elif is_product_photo and product_photo_confidence > 0.30 and very_strong_promo:
+                # Product photo BUT has very strong promo signals (e.g., sticker on product)
+                promotional_detected = True
+                promo_risk = 0.95  # High confidence - sticker/overlay on product
+                print(f"⚠️  Promotional check: PRODUCT PHOTO but STRONG PROMO signals → PROMOTIONAL")
             # SECOND PRIORITY: Image body verification with lower threshold
             # If image shows the actual product body (e.g., RAM module, phone, camera)
             elif image_body_match and body_match_confidence > 0.20:
@@ -299,7 +317,8 @@ class ImageChecker:
                 ) or promotional_detected_ocr
                 
                 print(f"✅ Promotional check: MULTI-SIGNAL detection")
-                print(f"   price={has_price}, phone={has_phone_number}, ecom_ui={has_ecommerce_ui}, button_ui={has_button_ui}, ocr_promo={promotional_detected_ocr}")
+                print(f"   price={has_price}, phone={has_phone_number}, ecom_ui={has_ecommerce_ui}, button_ui={has_button_ui}")
+                print(f"   promo_sticker={has_promotional_sticker}, ocr_promo={promotional_detected_ocr}")
                 print(f"   Result: promotional_detected={promotional_detected}")
                 
                 # Higher risk if multiple signals
@@ -347,6 +366,7 @@ class ImageChecker:
                     "body_match_confidence": body_match_confidence,
                     "is_product_photo": is_product_photo,
                     "is_title_match": is_title_match,
+                    "has_promotional_sticker": has_promotional_sticker,
                     "promotional_detected": promotional_detected
                 }
             })

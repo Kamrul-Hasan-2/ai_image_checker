@@ -347,6 +347,27 @@ class OCRService:
                     if product_text_confidence >= 2:
                         is_product_text_only = True
         
+        # DETECT PROMOTIONAL STICKERS on products (orange/colorful stickers with text)
+        # These are often missed because the product is real, but the sticker is promotional
+        has_promotional_sticker = False
+        if len(all_text) > 0 and text_coverage < 20:  # Moderate text coverage (not full overlay)
+            # Check if text contains business name + contact info pattern
+            # Common pattern: "STORE NAME" + text on a sticker (usually colorful background)
+            if has_business_name and (has_phone_number or has_price or has_link):
+                # Business name + contact = likely promotional sticker
+                has_promotional_sticker = True
+            # Also check for concentrated text in one area (typical of stickers)
+            elif len(text_positions) >= 2:
+                # Check if text is clustered in one region (sticker pattern)
+                x_positions = [pos[0] for pos in text_positions]
+                y_positions = [pos[1] for pos in text_positions]
+                x_std = np.std(x_positions)
+                y_std = np.std(y_positions)
+                # Low standard deviation = clustered text = likely sticker
+                is_clustered = x_std < 0.2 and y_std < 0.2
+                if is_clustered and has_business_name:
+                    has_promotional_sticker = True
+        
         # MULTI-SIGNAL PROMOTIONAL CONFIDENCE (0.0 to 1.0)
         promo_confidence = 0.0
         visual_promo_score = 0.0
@@ -362,6 +383,8 @@ class OCRService:
                 visual_promo_score += 0.3
             if strong_price_indicator:
                 visual_promo_score += 0.5
+            if has_promotional_sticker:
+                visual_promo_score += 0.6  # Promotional sticker on product
             
             # Text-based detection
             if has_phone_number or has_link:
@@ -372,6 +395,8 @@ class OCRService:
                 promo_confidence = 0.90  # E-commerce UI + visual cues
             elif visual_promo_score >= 0.6:
                 promo_confidence = 0.85  # Strong visual promotional indicators
+            elif has_promotional_sticker:
+                promo_confidence = 0.90  # Promotional sticker detected
             elif is_seller_branding:
                 promo_confidence = 0.80  # Business name overlay
             elif promo_count >= 3:
@@ -403,6 +428,7 @@ class OCRService:
             "promotional_confidence": promo_confidence,
             "promo_keyword_count": promo_count,
             "seller_branding_detected": is_seller_branding,
+            "has_promotional_sticker": has_promotional_sticker,
             "has_phone_number": has_phone_number,
             "has_price": has_price,
             "has_link": has_link,
