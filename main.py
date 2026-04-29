@@ -135,6 +135,7 @@ class ImageChecker:
             has_price = ocr_result.get("has_price", False)
             has_phone_number = ocr_result.get("has_phone_number", False)
             has_ecommerce_ui = ocr_result.get("has_ecommerce_ui", False)
+            has_link = ocr_result.get("has_link", False)
             promotional_detected_ocr = ocr_result.get("promotional_detected", False)
             
             print(f"✅ OCR done - text: {ocr_result.get('full_text', '')[:50]}..., promo conf: {promo_confidence_ocr:.2f}")
@@ -215,8 +216,15 @@ class ImageChecker:
             
             # Calculate final scores - only flag clear mobile UI screenshots
             screenshot_detected = screenshot_confidence > 0.90
-            # FIX: Check if blur check FAILED (not passed) instead of using confidence threshold
-            blur_detected = not quality_result['checks']['blur']['passed']
+
+            # Blur: use the confidence score from the new soft-voting system.
+            # If CLIP separately confirms this is a product photo, raise the bar —
+            # a confirmed product photo needs a stronger blur signal to be rejected.
+            blur_conf = quality_result.get("blur_confidence", 0.0)
+            if is_product_photo and product_photo_confidence > 0.40:
+                blur_detected = blur_conf >= 0.80
+            else:
+                blur_detected = blur_conf >= 0.65
             
             # Watermark detection is INDEPENDENT of promotional detection
             # Even product photos can have watermarks (bikroy, daraz, website logos)

@@ -146,351 +146,316 @@ class QualityCheckService:
         }
     
     def _check_blur(self, image: Image.Image) -> Dict:
-        """Check if image is too blurry or noisy using ADVANCED algorithms with feature engineering"""
-        # Convert to grayscale
+        """
+        Blur detection using a soft confidence-voting system.
+
+        Design principles:
+        - No single metric causes rejection (hard_reject removed).
+        - detail_loss is only trusted when the image has texture to measure.
+        - Motion blur is only flagged when anisotropy AND low sharpness agree.
+        - Laplacian penalty tiers start at realistic thresholds for product photos.
+        - Sharpness is measured on the center crop (where the product lives) in
+          addition to the global image, preventing white/plain borders from
+          diluting the signal.
+        """
         img_array = np.array(image.convert('L'))
-        
-        # Method 1: Laplacian variance (edge detection) - ENHANCED
+        h_img, w_img = img_array.shape
+
+        # ── 1. GLOBAL METRICS ────────────────────────────────────────────────
+
+        # Laplacian variance — the primary sharpness signal
         laplacian = cv2.Laplacian(img_array, cv2.CV_64F)
         laplacian_var = laplacian.var()
         laplacian_mean = np.abs(laplacian).mean()
-        
-        # Method 2: Tenengrad (gradient magnitude) - ENHANCED
+
+        # Tenengrad (Sobel gradient energy) — reliable, content-independent
         gx = cv2.Sobel(img_array, cv2.CV_64F, 1, 0, ksize=3)
         gy = cv2.Sobel(img_array, cv2.CV_64F, 0, 1, ksize=3)
         gradient_magnitude = np.sqrt(gx**2 + gy**2)
         tenengrad_score = np.mean(gradient_magnitude**2)
         gradient_std = np.std(gradient_magnitude)
-        
-        # Method 3: FFT-based frequency analysis - ENHANCED
-        fft = np.fft.fft2(img_array)
-        fft_shift = np.fft.fftshift(fft)
+
+        # FFT high-frequency energy ratio
+        fft_shift = np.fft.fftshift(np.fft.fft2(img_array))
         magnitude_spectrum = np.abs(fft_shift)
-        
-        # Analyze high frequency content (sharp images have more)
-        h, w = magnitude_spectrum.shape
-        center_y, center_x = h // 2, w // 2
-        radius = min(h, w) // 4
-        
-        # Create mask for high frequencies (outer region)
-        y, x = np.ogrid[:h, :w]
-        mask_high = ((x - center_x)**2 + (y - center_y)**2) > radius**2
-        mask_mid = (((x - center_x)**2 + (y - center_y)**2) > (radius//2)**2) & ~mask_high
-        
+        fh, fw = magnitude_spectrum.shape
+        cy, cx = fh // 2, fw // 2
+        radius = min(fh, fw) // 4
+        yy, xx = np.ogrid[:fh, :fw]
+        dist_sq = (xx - cx)**2 + (yy - cy)**2
+        mask_high = dist_sq > radius**2
+        mask_mid  = (dist_sq > (radius // 2)**2) & ~mask_high
         high_freq_energy = np.mean(magnitude_spectrum[mask_high])
-        mid_freq_energy = np.mean(magnitude_spectrum[mask_mid])
-        freq_ratio = high_freq_energy / (mid_freq_energy + 1e-10)  # Sharp images have good ratio
-        
-        # Method 4: Edge density and quality - ENHANCED WITH PRODUCT PHOTO AWARENESS
+        mid_freq_energy  = np.mean(magnitude_spectrum[mask_mid])
+        freq_ratio = high_freq_energy / (mid_freq_energy + 1e-10)
+
+        # Edge density (Canny)
         edges = cv2.Canny(img_array, 50, 150)
         edge_density = np.sum(edges > 0) / edges.size
-        
-        # Strong edges detection (blur reduces edge strength)
         strong_edges = cv2.Canny(img_array, 100, 200)
         strong_edge_density = np.sum(strong_edges > 0) / strong_edges.size
         edge_strength_ratio = strong_edge_density / (edge_density + 1e-10)
-        
-        # PRODUCT PHOTO DETECTION: Check if edges are concentrated in center
-        # Product photos often have clean backgrounds with detail in center
-        h, w = img_array.shape
-        center_y, center_w = h // 2, w // 2
-        
-        # Create center mask (50% of image in center)
-        y_start, y_end = h // 4, 3 * h // 4
-        x_start, x_end = w // 4, 3 * w // 4
-        center_edges = edges[y_start:y_end, x_start:x_end]
-        border_edges_top = edges[:h//4, :]
-        border_edges_bottom = edges[3*h//4:, :]
-        border_edges_left = edges[:, :w//4]
-        border_edges_right = edges[:, 3*w//4:]
-        
-        center_edge_density = np.sum(center_edges > 0) / center_edges.size if center_edges.size > 0 else 0
-        border_edge_density = (
-            np.sum(border_edges_top > 0) + np.sum(border_edges_bottom > 0) +
-            np.sum(border_edges_left > 0) + np.sum(border_edges_right > 0)
-        ) / (border_edges_top.size + border_edges_bottom.size + border_edges_left.size + border_edges_right.size + 1e-10)
-        
-        # Product photo indicator: center has much more detail than borders
-        is_product_photo_layout = center_edge_density > (border_edge_density * 2.5) and center_edge_density > 0.08
-        
-        # Method 5: Multi-scale blur detection (NEW)
-        # Sharp images maintain detail across scales
+
+        # ── 2. CENTER-CROP METRICS ───────────────────────────────────────────
+        # Products live in the center. Measure sharpness there rather than
+        # letting plain borders drag the global score down.
+        cy_img, cx_img = h_img // 2, w_img // 2
+        crop_h = max(1, int(h_img * 0.6))
+        crop_w = max(1, int(w_img * 0.6))
+        y1 = cy_img - crop_h // 2
+        x1 = cx_img - crop_w // 2
+        center_crop = img_array[y1:y1+crop_h, x1:x1+crop_w]
+
+        center_lap_var = cv2.Laplacian(center_crop, cv2.CV_64F).var()
+        center_edges_arr = cv2.Canny(center_crop, 50, 150)
+        center_edge_density = np.sum(center_edges_arr > 0) / center_edges_arr.size
+
+        # ── 3. PRODUCT LAYOUT DETECTION ──────────────────────────────────────
+        # Broadened: OR-logic so any of the three patterns qualify.
+        y_start, y_end = h_img // 4, 3 * h_img // 4
+        x_start, x_end = w_img // 4, 3 * w_img // 4
+        zone_center = edges[y_start:y_end, x_start:x_end]
+        zone_border = np.concatenate([
+            edges[:h_img//4, :].ravel(),
+            edges[3*h_img//4:, :].ravel(),
+            edges[:, :w_img//4].ravel(),
+            edges[:, 3*w_img//4:].ravel(),
+        ])
+        center_edge_density_zone = np.sum(zone_center > 0) / (zone_center.size + 1e-10)
+        border_edge_density_zone  = np.sum(zone_border > 0) / (zone_border.size + 1e-10)
+
+        # Pattern A: classic white-background centered product
+        pattern_centered = (
+            center_edge_density_zone > (border_edge_density_zone * 1.8)
+            and center_edge_density_zone > 0.04
+        )
+        # Pattern B: product fills the frame (distributed edges everywhere)
+        pattern_filled_frame = edge_density > 0.06 and center_edge_density > 0.05
+        # Pattern C: uniform bright background (white/light-grey studio shot)
+        corners_gray = [
+            img_array[:h_img//8, :w_img//8],
+            img_array[:h_img//8, -w_img//8:],
+            img_array[-h_img//8:, :w_img//8],
+            img_array[-h_img//8:, -w_img//8:],
+        ]
+        corner_means = [np.mean(c) for c in corners_gray]
+        avg_corner_brightness = np.mean(corner_means)
+        corner_std = np.std(corner_means)
+        pattern_studio_bg = avg_corner_brightness > 170 and corner_std < 35
+
+        is_product_photo_layout = pattern_centered or pattern_filled_frame or pattern_studio_bg
+
+        # ── 4. DETAIL-LOSS (only meaningful when the image has texture) ───────
         blur_3x3 = cv2.GaussianBlur(img_array, (3, 3), 0)
         blur_5x5 = cv2.GaussianBlur(img_array, (5, 5), 0)
         blur_7x7 = cv2.GaussianBlur(img_array, (7, 7), 0)
         detail_loss_3x3 = np.mean(np.abs(img_array.astype(np.float32) - blur_3x3.astype(np.float32)))
         detail_loss_5x5 = np.mean(np.abs(img_array.astype(np.float32) - blur_5x5.astype(np.float32)))
         detail_loss_7x7 = np.mean(np.abs(img_array.astype(np.float32) - blur_7x7.astype(np.float32)))
-        
-        # Detect motion blur (directional blur patterns)
-        # Motion blur has low variance in one direction
-        kernel_horizontal = np.ones((1, 9)) / 9
-        kernel_vertical = np.ones((9, 1)) / 9
-        h_blur_response = np.std(cv2.filter2D(img_array.astype(np.float32), -1, kernel_horizontal))
-        v_blur_response = np.std(cv2.filter2D(img_array.astype(np.float32), -1, kernel_vertical))
-        motion_blur_indicator = min(h_blur_response, v_blur_response) / (max(h_blur_response, v_blur_response) + 1e-10)
-        is_motion_blurred = motion_blur_indicator < 0.7  # Directional blur detected
-        
-        # Method 6: Wavelet-based sharpness (NEW - ADVANCED)
-        # Use difference of Gaussians to detect detail at multiple scales
+
+        # detail_loss is only a blur signal when the image has enough texture
+        # to lose. On a smooth surface a 3×3 blur removes almost nothing even
+        # when the image is perfectly sharp — so we gate on edge_density.
+        image_has_texture = edge_density > 0.05
+
+        # DoG wavelet energy
         dog_1 = cv2.GaussianBlur(img_array, (3, 3), 0.5) - cv2.GaussianBlur(img_array, (3, 3), 1.0)
         dog_2 = cv2.GaussianBlur(img_array, (5, 5), 1.0) - cv2.GaussianBlur(img_array, (5, 5), 2.0)
         wavelet_energy = np.mean(np.abs(dog_1)) + np.mean(np.abs(dog_2))
-        
-        # Method 7: NOISE DETECTION - ENHANCED with multiple metrics
-        # 7a. Local standard deviation (texture noise)
+
+        # ── 5. MOTION BLUR (anisotropy guard) ────────────────────────────────
+        # The old metric measures directional texture, not motion blur.
+        # We require BOTH anisotropy AND low sharpness to flag it.
+        kernel_h = np.ones((1, 9)) / 9
+        kernel_v = np.ones((9, 1)) / 9
+        h_response = np.std(cv2.filter2D(img_array.astype(np.float32), -1, kernel_h))
+        v_response = np.std(cv2.filter2D(img_array.astype(np.float32), -1, kernel_v))
+        motion_blur_indicator = min(h_response, v_response) / (max(h_response, v_response) + 1e-10)
+        # Only flag as motion-blurred when the ratio is very asymmetric (< 0.50,
+        # was 0.70) AND the image is genuinely soft — avoids directional textures
+        # like wood grain, fabric weave, corrugated packaging.
+        is_motion_blurred = (motion_blur_indicator < 0.50 and laplacian_var < 300)
+
+        # ── 6. NOISE METRICS ─────────────────────────────────────────────────
         kernel_size = 5
         mean_filtered = cv2.blur(img_array.astype(np.float32), (kernel_size, kernel_size))
-        variance_map = cv2.blur((img_array.astype(np.float32) - mean_filtered)**2, (kernel_size, kernel_size))
-        noise_score = np.mean(variance_map)
-        
-        # 7b. High-frequency noise in smooth regions
-        blurred = cv2.GaussianBlur(img_array, (5, 5), 0)
-        noise_map = np.abs(img_array.astype(np.float32) - blurred.astype(np.float32))
-        high_freq_noise = np.mean(noise_map)
-        
-        # 7c. Signal-to-Noise Ratio estimation
+        variance_map  = cv2.blur((img_array.astype(np.float32) - mean_filtered)**2,
+                                  (kernel_size, kernel_size))
+        noise_score   = np.mean(variance_map)
+        blurred_5     = cv2.GaussianBlur(img_array, (5, 5), 0)
+        high_freq_noise = np.mean(np.abs(img_array.astype(np.float32) - blurred_5.astype(np.float32)))
         signal_strength = np.std(mean_filtered)
-        noise_strength = np.mean(np.sqrt(variance_map))
+        noise_strength  = np.mean(np.sqrt(variance_map))
         snr = signal_strength / (noise_strength + 1e-10)
-        
-        # 7d. Texture uniformity (noisy images lack consistent texture)
-        # GLCM-inspired metric: consistency of local patterns
         kernel_3x3 = np.ones((3, 3)) / 9
         local_mean = cv2.filter2D(img_array.astype(np.float32), -1, kernel_3x3)
         local_variance = cv2.filter2D((img_array.astype(np.float32) - local_mean)**2, -1, kernel_3x3)
         texture_consistency = np.std(local_variance)
-        
-        # Method 8: Contrast and dynamic range (NEW)
-        contrast = np.std(img_array)
-        dynamic_range = np.max(img_array) - np.min(img_array)
-        
-        # BALANCED noise detection - catch real noise without false positives
-        # Distinguish between texture/grain and problematic noise
-        # Soft/lenient to avoid false positives on textured products
+
         is_noisy = (
-            noise_score > 200 or  # Soft threshold - only extreme noise
-            high_freq_noise > 11 or  # Soft threshold - only extreme noise
-            snr < 3.5 or  # Soft threshold - only extremely poor signal
-            (texture_consistency > 1200 and noise_score > 160)  # Soft combined check
+            noise_score > 250 or
+            high_freq_noise > 13 or
+            snr < 2.5 or
+            (texture_consistency > 1400 and noise_score > 200)
         )
-        
-        # Calculate penalties for poor quality indicators (BALANCED)
-        noise_penalty = 0
-        if is_noisy:
-            # Progressive penalty based on severity - SOFT/LENIENT
-            if noise_score > 280 or high_freq_noise > 13 or snr < 2.5:
-                noise_penalty = 30  # Severe noise - soft threshold
-            elif noise_score > 230 or high_freq_noise > 12 or snr < 3.5:
-                noise_penalty = 22  # High noise - soft threshold
-            else:
-                noise_penalty = 16  # Moderate noise
-        
-        # Low detail penalty - BALANCED - catch blurry images without false positives
-        detail_penalty = 0
-        if detail_loss_3x3 < 0.6:  # Severe lack of detail
-            detail_penalty = 30  # BALANCED penalty
-        elif detail_loss_3x3 < 1.2:  # Moderate lack of detail
-            detail_penalty = 22  # BALANCED penalty
-        elif detail_loss_3x3 < 2.0:  # Some lack of detail
-            detail_penalty = 15
-        elif wavelet_energy < 4:
-            detail_penalty = 12
-        
-        # Motion blur penalty - BALANCED
-        motion_blur_penalty = 0
+
+        # ── 7. CONTRAST ───────────────────────────────────────────────────────
+        contrast = np.std(img_array)
+        dynamic_range = int(np.max(img_array)) - int(np.min(img_array))
+
+        # ── 8. SOFT CONFIDENCE VOTING ─────────────────────────────────────────
+        # Each metric casts a weighted blur-confidence vote in [0, 1].
+        # No single vote causes rejection. Weights sum to 1.0.
+        votes = []
+
+        # (a) Laplacian — use the better of global and center-crop
+        best_lap = max(laplacian_var, center_lap_var)
+        lap_conf = max(0.0, 1.0 - best_lap / 800.0)   # saturates at 0 for lap >= 800
+        votes.append(lap_conf * 0.28)
+
+        # (b) Tenengrad — content-independent, reliable
+        ten_conf = max(0.0, 1.0 - tenengrad_score / 2000.0)
+        votes.append(ten_conf * 0.22)
+
+        # (c) FFT frequency ratio
+        fft_conf = max(0.0, 1.0 - freq_ratio / 0.6)
+        votes.append(fft_conf * 0.15)
+
+        # (d) detail_loss — only contributes when image has texture to lose
+        if image_has_texture:
+            dl_conf = max(0.0, 1.0 - detail_loss_3x3 / 5.0)
+            votes.append(dl_conf * 0.15)
+        else:
+            # Redistribute weight to tenengrad so totals stay balanced
+            ten_bonus = max(0.0, 1.0 - tenengrad_score / 2000.0)
+            votes.append(ten_bonus * 0.15)
+
+        # (e) Edge density — sparse edges in center suggests blur
+        edge_conf = max(0.0, 1.0 - center_edge_density / 0.08)
+        votes.append(edge_conf * 0.10)
+
+        # (f) Motion blur — only when anisotropy + low sharpness agree
         if is_motion_blurred:
-            motion_blur_penalty = 25  # BALANCED penalty for motion blur
-        
-        # Severe blur penalty (very low Laplacian) - AGGRESSIVE
-        severe_blur_penalty = 0
-        if laplacian_var < 150:  # Extremely blurry - stricter
-            severe_blur_penalty = 50  # Higher penalty
-        elif laplacian_var < 300:  # Very blurry - stricter
-            severe_blur_penalty = 40  # Higher penalty
-        elif laplacian_var < 500:  # Moderate blur - stricter
-            severe_blur_penalty = 30
-        elif laplacian_var < 800:  # Subtle blur - stricter
-            severe_blur_penalty = 22
-        
-        # Poor contrast penalty (BALANCED)
-        contrast_penalty = 0
-        if contrast < 25 or dynamic_range < 90:
-            contrast_penalty = 6  # Very low contrast/flat image
-        
-        # Combined quality penalty - BALANCED
-        # Catch poor quality without penalizing good images
-        combined_quality_penalty = 0
-        if is_noisy and laplacian_var < 180:  # Noisy + low sharpness - soft
-            combined_quality_penalty = 18
-        elif is_noisy and snr < 3.0:  # Noisy + poor SNR - soft
-            combined_quality_penalty = 15
-        elif is_noisy and laplacian_var < 320:  # Noisy + moderate sharpness - soft
-            combined_quality_penalty = 10
-        
-        # AGGRESSIVE SCORING - Stricter thresholds to catch blur
-        # Normalize scores with AGGRESSIVE thresholds
-        laplacian_normalized = min(laplacian_var / 500.0, 1.0)  # Stricter threshold
-        laplacian_mean_norm = min(laplacian_mean / 12.0, 1.0)  # Stricter threshold
-        
-        tenengrad_normalized = min(tenengrad_score / 800.0, 1.0)  # Stricter threshold
-        gradient_std_norm = min(gradient_std / 25.0, 1.0)  # Stricter threshold
-        
-        fft_normalized = min(high_freq_energy / 30.0, 1.0)  # Stricter threshold
-        freq_ratio_norm = min(freq_ratio / 0.40, 1.0)  # Stricter threshold
-        
-        edge_normalized = min(edge_density / 0.12, 1.0)  # Stricter threshold
-        edge_strength_norm = min(edge_strength_ratio / 0.40, 1.0)  # Stricter threshold
-        
-        detail_normalized = min(detail_loss_3x3 / 6.0, 1.0)  # Stricter threshold
-        wavelet_normalized = min(wavelet_energy / 16.0, 1.0)  # Stricter threshold
-        
-        snr_normalized = min(snr / 12.0, 1.0)  # Stricter threshold
-        contrast_normalized = min(contrast / 50.0, 1.0)  # Stricter threshold
-        
-        # WEIGHTED COMBINED SCORE with all features (0-100)
-        combined_score = (
-            laplacian_normalized * 22 +
-            laplacian_mean_norm * 9 +
-            tenengrad_normalized * 16 +
-            gradient_std_norm * 8 +
-            fft_normalized * 11 +
-            freq_ratio_norm * 5 +
-            edge_normalized * 10 +
-            edge_strength_norm * 5 +
-            detail_normalized * 6 +
-            wavelet_normalized * 5 +
-            snr_normalized * 2 +
-            contrast_normalized * 1
-        ) * 100
-        
-        # Apply ALL penalties (now includes combined quality penalty)
-        combined_score = max(0, combined_score - noise_penalty - detail_penalty - motion_blur_penalty - severe_blur_penalty - contrast_penalty - combined_quality_penalty)
-        
-        # HARD REJECTION - VERY AGGRESSIVE to catch moderate and slight blur
-        # Much stricter thresholds to catch all blurry images
-        hard_reject = (
-            laplacian_var < 150 or  # Extremely low sharpness - much stricter
-            detail_loss_3x3 < 1.2 or  # Almost no detail - much stricter
-            wavelet_energy < 10 or  # Very low detail energy - much stricter
-            (is_motion_blurred and laplacian_var < 400) or  # Clear motion blur - much stricter
-            (laplacian_var < 250 and detail_loss_3x3 < 2.0) or  # Combined severe indicators - much stricter
-            (laplacian_var < 500 and detail_loss_3x3 < 3.0 and not is_product_photo_layout) or  # Regular blur - much stricter
-            (edge_density < 0.04 and not is_product_photo_layout) or  # Very few edges - much stricter
-            (edge_density < 0.08 and laplacian_var < 450 and not is_product_photo_layout) or  # Low edges + blur - much stricter
-            (is_noisy and laplacian_var < 300) or  # Noisy + low sharpness - much stricter
-            snr < 2.5 or  # Extremely poor signal - much stricter
-            (is_noisy and snr < 5.0 and laplacian_var < 350) or  # Noisy + poor SNR - much stricter
-            (noise_score > 280 and laplacian_var < 500) or  # Extreme noise - much stricter
-            (tenengrad_score < 450 and laplacian_var < 500 and not is_product_photo_layout) or  # Low gradient - much stricter
-            (wavelet_energy < 12 and laplacian_var < 550) or  # Low detail energy - much stricter
-            (gradient_std < 18 and laplacian_var < 450) or  # Very low gradient variation - much stricter
-            (contrast < 32 and laplacian_var < 500)  # Very low contrast + blur - much stricter
+            votes.append(0.70 * 0.10)
+        else:
+            votes.append(0.0)
+
+        blur_confidence = sum(votes)  # 0.0 = sharp, 1.0 = blurry
+
+        # Product layout gives a grace margin: confirmed product photos need a
+        # stronger signal before we reject.
+        if is_product_photo_layout:
+            blur_confidence *= 0.80
+
+        # ── 9. THRESHOLDS ────────────────────────────────────────────────────
+        # Calibrated so obviously blurry phone-camera shots score > 0.65 and
+        # sharp white-background product photos score < 0.45.
+        REJECT_THRESHOLD    = 0.65   # was effectively ~0.40 with hard_reject
+        BORDERLINE_THRESHOLD = 0.50
+
+        is_blurry    = blur_confidence >= REJECT_THRESHOLD
+        is_borderline = BORDERLINE_THRESHOLD <= blur_confidence < REJECT_THRESHOLD
+
+        # ── 10. ABSOLUTE FLOOR — only truly catastrophic images ───────────────
+        # These conditions are undeniable regardless of content type.
+        # Kept minimal on purpose: a single clear signal that cannot be a
+        # false positive for any legitimate product image.
+        absolute_reject = (
+            laplacian_var < 30 and center_lap_var < 30    # completely out-of-focus
+        ) or (
+            snr < 1.5                                       # signal buried in noise
         )
-        
-        if hard_reject:
-            combined_score = 0  # Force rejection
-        
-        # VERY AGGRESSIVE THRESHOLDS - Catch all blur strictly
-        # < 65: Poor quality (REJECT) - Severely blurry images
-        # 65-75: Borderline quality - Some issues, moderately blurry
-        # 75+: Acceptable (good quality)
-        is_blurry = combined_score < 65
-        is_borderline = 65 <= combined_score < 75
-        
-        # Calculate confidence (0.0 to 1.0) - lower score = higher blur confidence
-        blur_confidence = max(0.0, min(1.0, (75 - combined_score) / 75)) if combined_score < 75 else 0.0
-        
-        # Determine failure reason with detailed diagnosis
+        if absolute_reject:
+            blur_confidence = 1.0
+            is_blurry = True
+
+        # ── 11. REASON STRING ────────────────────────────────────────────────
         quality_issues = []
-        if hard_reject:
-            quality_issues.append("EXTREME BLUR/POOR QUALITY")
-        if snr < 3:
+        if snr < 2.5:
             quality_issues.append("extremely poor signal quality")
-        elif snr < 8:
+        elif snr < 5:
             quality_issues.append("poor signal quality")
         if is_motion_blurred:
             quality_issues.append("motion blur detected")
-        if laplacian_var < 150:
+        if laplacian_var < 50:
             quality_issues.append("extremely blurry")
-        elif laplacian_var < 300:
+        elif laplacian_var < 150:
             quality_issues.append("severely blurry")
-        elif laplacian_var < 500:
+        elif laplacian_var < 300:
             quality_issues.append("very blurry")
-        elif laplacian_var < 800:
-            quality_issues.append("moderately blurry")
-        elif laplacian_var < 1200:
-            quality_issues.append("slightly blurry")
         if is_noisy:
             quality_issues.append("noisy/grainy")
-        if detail_loss_3x3 < 0.8:
-            quality_issues.append("severely lacks detail")
-        elif detail_loss_3x3 < 1.5:
+        if image_has_texture and detail_loss_3x3 < 1.0:
             quality_issues.append("lacks detail")
-        if contrast < 30:
+        if contrast < 20:
             quality_issues.append("low contrast")
-        
         quality_issue = " and ".join(quality_issues) if quality_issues else "poor quality"
-        
+
         details = {
-            "combined_score": combined_score,
-            "hard_reject": hard_reject,
+            "combined_score": round((1.0 - blur_confidence) * 100, 1),
+            "blur_confidence": round(blur_confidence, 3),
             "is_product_photo_layout": is_product_photo_layout,
-            "center_edge_density": center_edge_density,
-            "border_edge_density": border_edge_density,
-            "laplacian_var": laplacian_var,
-            "laplacian_mean": laplacian_mean,
-            "tenengrad_score": tenengrad_score,
-            "gradient_std": gradient_std,
-            "high_freq_energy": high_freq_energy,
-            "freq_ratio": freq_ratio,
-            "edge_density": edge_density,
-            "strong_edge_density": strong_edge_density,
-            "edge_strength_ratio": edge_strength_ratio,
-            "detail_loss": detail_loss_3x3,
-            "detail_loss_5x5": detail_loss_5x5,
-            "detail_loss_7x7": detail_loss_7x7,
-            "wavelet_energy": wavelet_energy,
-            "motion_blur_indicator": motion_blur_indicator,
+            "layout_patterns": {
+                "centered": pattern_centered,
+                "filled_frame": pattern_filled_frame,
+                "studio_bg": pattern_studio_bg,
+            },
+            "center_edge_density": round(center_edge_density, 4),
+            "border_edge_density": round(border_edge_density_zone, 4),
+            "laplacian_var": round(laplacian_var, 2),
+            "center_lap_var": round(center_lap_var, 2),
+            "laplacian_mean": round(laplacian_mean, 3),
+            "tenengrad_score": round(tenengrad_score, 2),
+            "gradient_std": round(gradient_std, 3),
+            "high_freq_energy": round(high_freq_energy, 3),
+            "freq_ratio": round(freq_ratio, 4),
+            "edge_density": round(edge_density, 4),
+            "strong_edge_density": round(strong_edge_density, 4),
+            "edge_strength_ratio": round(edge_strength_ratio, 4),
+            "detail_loss": round(detail_loss_3x3, 3),
+            "detail_loss_5x5": round(detail_loss_5x5, 3),
+            "detail_loss_7x7": round(detail_loss_7x7, 3),
+            "image_has_texture": image_has_texture,
+            "wavelet_energy": round(wavelet_energy, 3),
+            "motion_blur_indicator": round(motion_blur_indicator, 4),
             "is_motion_blurred": is_motion_blurred,
-            "noise_score": noise_score,
-            "high_freq_noise": high_freq_noise,
-            "snr": snr,
-            "texture_consistency": texture_consistency,
-            "contrast": contrast,
+            "noise_score": round(noise_score, 3),
+            "high_freq_noise": round(high_freq_noise, 3),
+            "snr": round(snr, 3),
+            "texture_consistency": round(texture_consistency, 3),
+            "contrast": round(contrast, 3),
             "dynamic_range": dynamic_range,
             "is_noisy": is_noisy,
-            "penalties": {
-                "noise": noise_penalty,
-                "detail": detail_penalty,
-                "motion_blur": motion_blur_penalty,
-                "severe_blur": severe_blur_penalty,
-                "contrast": contrast_penalty,
-                "combined_quality": combined_quality_penalty
+            "absolute_reject": absolute_reject,
+            "vote_breakdown": {
+                "laplacian": round(lap_conf, 3),
+                "tenengrad": round(ten_conf, 3),
+                "fft": round(fft_conf, 3),
+                "motion_blur": float(is_motion_blurred),
             },
             "quality_grade": "poor" if is_blurry else "borderline" if is_borderline else "good",
-            "confidence": blur_confidence
+            "confidence": round(blur_confidence, 3),
         }
-        
+
         if is_blurry:
-            reason_text = f"Image too {quality_issue} (score: {combined_score:.1f}/100)"
+            reason_text = f"Image too {quality_issue} (blur_conf: {blur_confidence:.2f})"
             if is_product_photo_layout:
-                reason_text += " [Product layout]"
+                reason_text += " [Product layout applied]"
             return {
                 "passed": False,
                 "reason": reason_text,
                 "details": details,
-                "confidence": blur_confidence
+                "confidence": round(blur_confidence, 3),
             }
-        
-        reason_text = f"Image sharpness acceptable (score: {combined_score:.1f}/100)"
+
+        reason_text = f"Image sharpness acceptable (blur_conf: {blur_confidence:.2f})"
         if is_product_photo_layout:
             reason_text += " [Product layout]"
         return {
             "passed": True,
             "reason": reason_text,
             "details": details,
-            "confidence": blur_confidence
+            "confidence": round(blur_confidence, 3),
         }
     
     def _check_corrupted(self, image: Image.Image) -> Dict:
