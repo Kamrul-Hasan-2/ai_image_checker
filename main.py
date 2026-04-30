@@ -24,6 +24,7 @@ from ocr_service import OCRService
 from clip_service import CLIPService
 from qwen_service import Qwen2VLService
 from screenshot_detector import compute_screenshot_score, apply_screenshot_decision
+from promotional_detector import detect_promotional_text
 
 # Create FastAPI app
 app = FastAPI(
@@ -148,6 +149,20 @@ class ImageChecker:
             has_promotional_sticker = ocr_result.get("has_promotional_sticker", False)
             digit_count = ocr_result.get("digit_count", 0)
             
+            # Vocabulary-aware promotional text detection
+            # Runs BEFORE product-photo guard so the guard can see a trustworthy signal.
+            promo_detection = detect_promotional_text(
+                ocr_extracted_data=ocr_result.get("extracted_data", []),
+                full_ocr_text=ocr_result.get("full_text", ""),
+                title=title or "",
+                description=description or "",
+                category=category,
+                image_id=image_id or 0,
+            )
+            promotional_detected_ocr = promo_detection["is_promotional"]
+            promo_detection_confidence = promo_detection["confidence_score"]
+            print(f"✅ Promo detector: is_promotional={promotional_detected_ocr}, confidence={promo_detection_confidence}")
+
             # CRITICAL: Check if image shows actual product (using CLIP)
             # If it's a product photo, text on it is part of the product, NOT promotional
             product_check = self.clip_service.detect_product_photo(image)
@@ -343,8 +358,10 @@ class ImageChecker:
                 print(f"   promo_sticker={has_promotional_sticker}, ocr_promo={promotional_detected_ocr}")
                 print(f"   Result: promotional_detected={promotional_detected}")
                 
-                # Higher risk if multiple signals
-                if has_price and has_phone_number:
+                # Boost risk using vocabulary-aware confidence score
+                if promo_detection_confidence >= 50:
+                    promo_risk = min(0.9, promo_risk + promo_detection_confidence / 100.0)
+                elif has_price and has_phone_number:
                     promo_risk = min(0.9, promo_risk + 0.3)
                 if has_ecommerce_ui or has_button_ui:
                     promo_risk = min(0.9, promo_risk + 0.2)
@@ -389,7 +406,11 @@ class ImageChecker:
                     "is_product_photo": is_product_photo,
                     "is_title_match": is_title_match,
                     "has_promotional_sticker": has_promotional_sticker,
-                    "promotional_detected": promotional_detected
+                    "promotional_detected": promotional_detected,
+                    "promo_detector_confidence": promo_detection_confidence,
+                    "promo_detector_flags": [h["type"] for h in promo_detection.get("promotional_flags", [])],
+                    "promo_detector_reason": promo_detection.get("reason", ""),
+                    "promo_unmatched_tokens": promo_detection.get("unmatched_texts", [])[:10],
                 }
             })
 
