@@ -174,12 +174,14 @@ class ImageChecker:
             has_price = ocr_result.get("has_price", False)
             has_phone_number = ocr_result.get("has_phone_number", False)
             has_ecommerce_ui = ocr_result.get("has_ecommerce_ui", False)
+            has_link = ocr_result.get("has_link", False)
             promotional_detected_ocr = ocr_result.get("promotional_detected", False)
             
             # NEW: Visual promo indicators
             visual_promo_score = ocr_result.get("visual_promo_score", 0.0)
             strong_price_indicator = ocr_result.get("strong_price_indicator", False)
             has_button_ui = ocr_result.get("has_button_ui", False)
+            has_promotional_sticker = ocr_result.get("has_promotional_sticker", False)
             digit_count = ocr_result.get("digit_count", 0)
             
             # CRITICAL: Check if image shows actual product (using CLIP)
