@@ -220,7 +220,8 @@ class ImageChecker:
 
             # OCR + CLIP based screenshot detection (catches web/app screenshots
             # that pass the OpenCV mobile-UI check above)
-            ocr_screenshot = compute_screenshot_score(ocr_result, product_check)
+            img_w, img_h = image.size
+            ocr_screenshot = compute_screenshot_score(ocr_result, product_check, img_w, img_h)
             if ocr_screenshot["is_screenshot"]:
                 screenshot_detected = True
                 print(f"📸 Screenshot detected by OCR scorer: score={ocr_screenshot['screenshot_score']:.2f}, reasons={ocr_screenshot['reasons']}")

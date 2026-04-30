@@ -13,7 +13,7 @@ Detection targets (BD marketplace context):
 """
 
 import re
-from typing import Dict
+from typing import Dict, List, Any
 
 
 # ── HARD KEYWORDS ─────────────────────────────────────────────────────────────
@@ -81,9 +81,106 @@ _URL_RE = re.compile(
 )
 
 
+def analyse_text_layout(
+    ocr_boxes: List[Dict[str, Any]],
+    img_width: int,
+    img_height: int,
+) -> Dict[str, Any]:
+    """
+    Decide whether OCR text looks like UI/screenshot text or product text,
+    using only bounding-box position and size — no ML, no external libraries.
+
+    Rules (plain English):
+      1. UI text is wide  → box covers > 50% of image width
+      2. UI text is edge  → box centre sits in top or bottom 15% of image
+      3. Product text is centred → box centre sits in middle 70% of image
+
+    A box that is BOTH wide AND near an edge is almost certainly a nav bar,
+    header, or footer — never a brand name printed on a physical product.
+
+    Args:
+        ocr_boxes  : list of {"text": str, "bbox": [[x,y],[x,y],[x,y],[x,y]]}
+                     (EasyOCR polygon format — 4 corner points)
+        img_width  : image width  in pixels
+        img_height : image height in pixels
+
+    Returns:
+        dict with:
+            is_ui_layout   (bool)  – True means screenshot-like layout
+            ui_box_count   (int)   – how many boxes triggered the rule
+            total_boxes    (int)   – total boxes examined
+            layout_score   (float) – 0.0–1.0, fraction of boxes that look like UI
+    """
+
+    # Safety: skip if image dimensions are unknown or no boxes present
+    if not ocr_boxes or img_width <= 0 or img_height <= 0:
+        return {"is_ui_layout": False, "ui_box_count": 0,
+                "total_boxes": 0, "layout_score": 0.0}
+
+    # Threshold constants — see Section 4 for why these values are chosen
+    EDGE_ZONE   = 0.15   # top or bottom 15% of image height = "edge zone"
+    WIDE_RATIO  = 0.50   # box wider than 50% of image width = "wide text"
+    UI_FRACTION = 0.35   # if >35% of all boxes are UI-like → flag layout
+
+    ui_box_count = 0     # boxes that look like UI (wide AND near edge)
+    centre_box_count = 0 # boxes that look like product text (centred)
+
+    for box in ocr_boxes:
+        bbox = box.get("bbox", [])
+        if not bbox or len(bbox) < 2:
+            continue
+
+        # EasyOCR gives 4 corner points [[x,y], [x,y], [x,y], [x,y]]
+        # Extract the bounding rectangle from those corners
+        xs = [pt[0] for pt in bbox]
+        ys = [pt[1] for pt in bbox]
+        box_left   = min(xs)
+        box_right  = max(xs)
+        box_top    = min(ys)
+        box_bottom = max(ys)
+
+        box_width  = box_right - box_left
+        box_centre_y = (box_top + box_bottom) / 2   # vertical centre of this box
+
+        # Rule 1: is this box wide? (covers more than 50% of image width)
+        is_wide = (box_width / img_width) > WIDE_RATIO
+
+        # Rule 2: is this box near the top or bottom edge?
+        near_top    = box_centre_y < img_height * EDGE_ZONE
+        near_bottom = box_centre_y > img_height * (1.0 - EDGE_ZONE)
+        is_near_edge = near_top or near_bottom
+
+        # A box that is wide AND near an edge = UI chrome (nav bar, footer, etc.)
+        if is_wide and is_near_edge:
+            ui_box_count += 1
+
+        # Track centred boxes for context (product text is usually centred)
+        is_centred_vertically = (
+            img_height * 0.15 < box_centre_y < img_height * 0.85
+        )
+        if is_centred_vertically and not is_wide:
+            centre_box_count += 1
+
+    total_boxes  = len(ocr_boxes)
+    layout_score = ui_box_count / total_boxes if total_boxes > 0 else 0.0
+
+    # Flag as UI layout if enough boxes trigger the rule
+    is_ui_layout = layout_score >= UI_FRACTION
+
+    return {
+        "is_ui_layout":    is_ui_layout,
+        "ui_box_count":    ui_box_count,
+        "centre_box_count": centre_box_count,
+        "total_boxes":     total_boxes,
+        "layout_score":    round(layout_score, 3),
+    }
+
+
 def compute_screenshot_score(
     ocr_result: Dict,
     clip_product_check: Dict,
+    img_width: int = 0,
+    img_height: int = 0,
 ) -> Dict:
     """
     Compute a screenshot likelihood score using already-computed pipeline outputs.
@@ -186,6 +283,20 @@ def compute_screenshot_score(
         clip_contribution = min((promo_score - 0.35) * 1.5, 0.25)
         score += clip_contribution
         reasons.append(f"clip_promo_signal({promo_score:.2f})")
+
+    # ── SIGNAL D: Bounding-box layout analysis ────────────────────────────────
+    # Wide text boxes pinned to the top/bottom edge = nav bars, footers, headers.
+    # This catches screenshots where OCR keywords are missing (e.g. image-rendered UI).
+    if img_width > 0 and img_height > 0:
+        ocr_boxes = ocr_result.get("extracted_data", [])
+        layout = analyse_text_layout(ocr_boxes, img_width, img_height)
+        if layout["is_ui_layout"]:
+            layout_contribution = min(layout["layout_score"] * 0.5, 0.30) * sensitivity
+            score += layout_contribution
+            reasons.append(
+                f"ui_layout(ui_boxes={layout['ui_box_count']}/"
+                f"{layout['total_boxes']}, score={layout['layout_score']:.2f})"
+            )
 
     # ── NORMALIZE ─────────────────────────────────────────────────────────────
     score = min(score, 1.0)
