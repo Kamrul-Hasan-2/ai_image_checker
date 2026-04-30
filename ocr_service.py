@@ -175,24 +175,26 @@ class OCRService:
         
         # Price patterns (detect prices in multiple formats)
         price_patterns = [
-            # Indian rupee format (lakhs): ₹1,03,155 or Rs.1,03,155
-            r'[₹₨Rs\.]\s*[0-9]{1,3},[0-9]{2},[0-9]{3}',  # Indian lakh: ₹1,03,155
-            r'[₹₨Rs\.]\s*[0-9]{1,2},[0-9]{2},[0-9]{2},[0-9]{3}',  # Indian crore: ₹1,25,00,000
-            r'[₹₨Rs\.]\s*[0-9]{1,3},[0-9]{3}',  # Standard: ₹24,999
-            r'[₹₨Rs\.]\s*[0-9]{3,7}',  # Without comma: ₹24999 (3+ digits)
-            # Standard format
-            r'[0-9]{1,3},[0-9]{2},[0-9]{3}',  # Indian lakh without symbol: 1,03,155
-            r'[0-9]{1,3},[0-9]{3}',  # Standard: 24,999 or 1,999
-            # Bangladesh taka
-            r'[0-9]{3,6}\s*(tk|taka|৳)',  # e.g., 999 tk or 17999 tk
-            r'(tk|taka|৳)\s*[0-9]{3,6}',  # e.g., tk 999 or tk 17999
-            # Price keywords
-            r'price[:\s]*[0-9,]+',  # price: 1,03,155
-            r'(rs|rupees?)[.\s]*[0-9,]+',  # Rs. 103155 or rupees 103155
-            # Fallback: any large number with comma (likely price)
-            r'[0-9]{2,3},[0-9]{3,5}',  # Any comma-separated number
-            # Standalone numbers that look like prices (3+ digits)
-            r'\b[0-9]{3,7}\b',  # Any 3-7 digit number standalone
+            # Currency symbol + number (unambiguous — symbol cannot be a model label)
+            r'[₹₨৳]\s*[0-9]{1,3},[0-9]{2},[0-9]{3}',   # ₹1,03,155
+            r'[₹₨৳]\s*[0-9]{1,2},[0-9]{2},[0-9]{2},[0-9]{3}',  # ₹1,25,00,000
+            r'[₹₨৳]\s*[0-9]{1,3},[0-9]{3}',             # ₹24,999
+            r'[₹₨৳]\s*[0-9]{3,7}',                      # ₹24999
+            # "Rs." must be a whole word, not the tail of another word (e.g. "55mm")
+            r'\bRs\.?\s*[0-9]{1,3},[0-9]{3}',           # Rs. 24,999
+            r'\bRs\.?\s*[0-9]{3,7}',                    # Rs. 24999
+            # Bangladesh taka with explicit suffix/prefix
+            r'[0-9]{3,6}\s*(tk|taka|৳)',                 # 999 tk / 17999 tk
+            r'(tk|taka|৳)\s*[0-9]{3,6}',                # tk 999
+            # Price keyword followed by number
+            r'price\s*[:\s]\s*[0-9,]+',                  # price: 1,03,155
+            r'\brupees?\s*[0-9,]+',                      # rupees 103155
+            # Comma-formatted number (1,999 or 24,999) — needs comma to be unambiguous
+            r'\b[0-9]{1,3},[0-9]{3}\b',                 # 24,999 or 1,999
+            r'\b[0-9]{1,3},[0-9]{2},[0-9]{3}\b',        # 1,03,155 (lakh without symbol)
+            # NOTE: removed bare \b[0-9]{3,7}\b — it matched model numbers like
+            # "1500" on a UPS or "600D" on a camera. Real prices need a currency
+            # symbol, word-boundary-protected "Rs", taka keyword, or comma formatting.
         ]
         has_price = any(re.search(pattern, full_text, re.IGNORECASE) for pattern in price_patterns)
         

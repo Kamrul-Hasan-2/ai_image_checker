@@ -282,13 +282,16 @@ class ImageChecker:
             
             # Check for VERY STRONG promotional signals first (overrides everything)
             # These are clear promotional indicators that should be detected even on product photos
+            # strong_price_indicator requires a currency symbol (৳, $, ₹) or a
+            # comma-formatted number (e.g. 24,999). This excludes bare model
+            # numbers like "1500" on a UPS or "600D" on a camera.
             very_strong_promo = (
-                (has_phone_number and has_price) or  # Phone + price = clear promo
-                (has_phone_number and has_link) or   # Phone + website = clear promo  
-                (has_ecommerce_ui and has_price) or  # E-commerce UI + price = clear promo
-                (has_button_ui and has_phone_number) or  # Buttons + phone = clear promo
-                (has_price and has_link and len(ocr_result.get('full_text', '')) > 20) or  # Price + link + substantial text
-                has_promotional_sticker  # Promotional sticker detected on product
+                (has_phone_number and strong_price_indicator) or  # Phone + real price = clear promo
+                (has_phone_number and has_link) or                # Phone + website = clear promo
+                (has_ecommerce_ui and strong_price_indicator) or  # E-commerce UI + real price = clear promo
+                (has_button_ui and has_phone_number) or           # Buttons + phone = clear promo
+                (strong_price_indicator and has_link) or          # Real price + link (not just a model number)
+                has_promotional_sticker                           # Promotional sticker on product
             )
             
             # HIGHEST PRIORITY: Product photo detection (CLIP-based)
