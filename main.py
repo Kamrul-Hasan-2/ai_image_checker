@@ -23,6 +23,7 @@ from quality_service import QualityCheckService
 from ocr_service import OCRService
 from clip_service import CLIPService
 from qwen_service import Qwen2VLService
+from screenshot_detector import compute_screenshot_score, apply_screenshot_decision
 
 # Create FastAPI app
 app = FastAPI(
@@ -217,6 +218,15 @@ class ImageChecker:
             # Calculate final scores - only flag clear mobile UI screenshots
             screenshot_detected = screenshot_confidence > 0.90
 
+            # OCR + CLIP based screenshot detection (catches web/app screenshots
+            # that pass the OpenCV mobile-UI check above)
+            ocr_screenshot = compute_screenshot_score(ocr_result, product_check)
+            if ocr_screenshot["is_screenshot"]:
+                screenshot_detected = True
+                print(f"📸 Screenshot detected by OCR scorer: score={ocr_screenshot['screenshot_score']:.2f}, reasons={ocr_screenshot['reasons']}")
+            elif ocr_screenshot["flag_for_review"]:
+                print(f"⚠️  Possible screenshot (flag): score={ocr_screenshot['screenshot_score']:.2f}, reasons={ocr_screenshot['reasons']}")
+
             # Blur: use the confidence score from the new soft-voting system.
             # If CLIP separately confirms this is a product photo, raise the bar —
             # a confirmed product photo needs a stronger blur signal to be rejected.
@@ -378,7 +388,11 @@ class ImageChecker:
                     "promotional_detected": promotional_detected
                 }
             })
-            
+
+            # Apply OCR-based screenshot score (upgrades screen_short and risk_level
+            # for web/app screenshots that slipped past the OpenCV mobile-UI check)
+            result = apply_screenshot_decision(result, ocr_screenshot)
+
             return result
             
         except Exception as e:
