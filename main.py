@@ -163,6 +163,13 @@ class ImageChecker:
             promo_detection_confidence = promo_detection["confidence_score"]
             print(f"✅ Promo detector: is_promotional={promotional_detected_ocr}, confidence={promo_detection_confidence}")
 
+            # If the vocabulary-aware detector found zero promotional patterns,
+            # the OCR sticker heuristic is a false positive — clear it.
+            # The sticker detector cannot distinguish "www.apc.com" printed on the
+            # device body from a seller overlay sticker; the vocab detector can.
+            if promo_detection_confidence == 0 and not promotional_detected_ocr:
+                has_promotional_sticker = False
+
             # CRITICAL: Check if image shows actual product (using CLIP)
             # If it's a product photo, text on it is part of the product, NOT promotional
             product_check = self.clip_service.detect_product_photo(image)

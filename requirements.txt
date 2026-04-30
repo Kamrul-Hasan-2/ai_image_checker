@@ -14,6 +14,7 @@ numpy>=2.0,<2.3.0
 
 # OCR
 easyocr==1.7.2
+rapidfuzz>=3.0.0
 
 # AI/ML Models
 torch==2.9.1
