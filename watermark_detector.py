@@ -181,6 +181,13 @@ def _detect_transparent_overlay(bgr: np.ndarray) -> Dict[str, Any]:
         if abs(blob_mean - img_mean) < 12:
             continue
 
+        # Skip: blob that occupies a large contiguous region of the product body
+        # (e.g. a coloured PCB or panel label) — check that the blob area is not
+        # too wide relative to the bounding rect (filled rectangles = product part)
+        fill_ratio = area / max(bw * bh, 1)
+        if fill_ratio > 0.65 and (bw * bh) / (w * h) > 0.10:
+            continue
+
         overlay_blobs.append({"area": area, "rect": (x, y, bw, bh), "mean": round(blob_mean, 1)})
 
     has_overlay = len(overlay_blobs) > 0
@@ -249,8 +256,14 @@ def _detect_diagonal_text(bgr: np.ndarray) -> Dict[str, Any]:
         if _DIAG_ANGLE_MIN <= angle <= _DIAG_ANGLE_MAX:
             bw, bh = rect[1]
             aspect = max(bw, bh) / (min(bw, bh) + 1)
-            # Logo text tends to be elongated (aspect > 2)
-            if aspect > 1.5:
+            # Logo text tends to be elongated (aspect > 2).
+            # Require aspect > 2.5 (not 1.5) to avoid product labels on tilted hardware.
+            # Also require blob NOT to span most of the image width/height — real watermark
+            # text is a floating overlay, not a label printed on the full product face.
+            blob_w_frac = bw / w
+            blob_h_frac = bh / h
+            is_product_label = (blob_w_frac > 0.50 or blob_h_frac > 0.50)
+            if aspect > 2.5 and not is_product_label:
                 diagonal_blobs.append({
                     "area":   float(area),
                     "angle":  round(float(angle), 1),
@@ -409,12 +422,17 @@ def _detect_corner_logo(bgr: np.ndarray) -> Dict[str, Any]:
         # Conditions for a logo patch:
         # 1. Background is relatively uniform (std < product centre std × 0.7)
         is_uniform = zone_std < min(centre_std * 0.70, 45.0)
-        # 2. There is actual content (not blank)
-        has_content = edge_density > 3.0
-        # 3. Colour is different from the product centre
-        is_different = abs(zone_mean - centre_mean) > 18.0
+        # 2. There is actual content (not blank) — raise threshold to avoid
+        #    product edges / background surface texture triggering this
+        has_content = edge_density > 6.0
+        # 3. Colour is different from the product centre — tighten to 30 to
+        #    avoid plain background areas around hardware products
+        is_different = abs(zone_mean - centre_mean) > 30.0
+        # 4. Zone must not be very bright (near-white background regions around
+        #    products on white surfaces are not logo patches)
+        is_not_plain_bg = zone_mean < 230.0
 
-        if is_uniform and has_content and is_different:
+        if is_uniform and has_content and is_different and is_not_plain_bg:
             logo_zones.append(name)
             # Score: edge density (more logo pixels = higher confidence) scaled 0-1
             zone_scores[name] = min(edge_density / 25.0, 1.0)
@@ -511,9 +529,9 @@ def detect_watermark_visual(
             sum(scores[k] * weights[k] for k in weights) * 1.40,
             1.0,
         )
-        # For product photos: require higher confidence from multi-signal (0.60 vs 0.50)
+        # For product photos: require higher confidence from multi-signal (0.65 vs 0.50)
         # This avoids false positives from product graphics being detected as watermark signals
-        threshold = 0.60 if (is_product_photo and product_photo_confidence > 0.40) else WATERMARK_SCORE_THRESHOLD
+        threshold = 0.65 if (is_product_photo and product_photo_confidence > 0.40) else WATERMARK_SCORE_THRESHOLD
         is_watermark   = weighted_score >= threshold
         decision_reason = f"multi_signal({','.join(firing_signals)})"
 
@@ -526,9 +544,9 @@ def detect_watermark_visual(
             "corner_logo":         0.10,
         }
         weighted_score = sum(scores[k] * weights[k] for k in weights)
-        # For product photos with only one weak signal, require much higher confidence (0.70)
+        # For product photos with only one weak signal, require much higher confidence (0.75)
         # to avoid false positives from product labels, tags, or branding being detected as watermarks
-        threshold = 0.70 if (is_product_photo and product_photo_confidence > 0.40) else WATERMARK_SCORE_THRESHOLD
+        threshold = 0.75 if (is_product_photo and product_photo_confidence > 0.40) else WATERMARK_SCORE_THRESHOLD
         is_watermark   = weighted_score >= threshold
         decision_reason = "weighted_sum_single_signal"
 
