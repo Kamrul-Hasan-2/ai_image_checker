@@ -285,39 +285,42 @@ class QualityCheckService:
         # (e.g. face anonymisation, censored content) while background is sharp.
         # Global metrics miss this because the sharp background dominates.
         #
-        # Method: divide image into a 6×6 grid, compute local Laplacian variance
-        # per cell.  If ≥30% of cells are "blurry" (< 20% of the median cell
-        # variance) AND other cells are clearly sharp, we have selective blur.
-        GRID_ROWS, GRID_COLS = 6, 6
-        cell_h = max(1, h_img // GRID_ROWS)
-        cell_w = max(1, w_img // GRID_COLS)
-        cell_vars = []
-        for gr in range(GRID_ROWS):
-            for gc in range(GRID_COLS):
-                r0, r1 = gr * cell_h, min((gr + 1) * cell_h, h_img)
-                c0, c1 = gc * cell_w, min((gc + 1) * cell_w, w_img)
-                cell = img_array[r0:r1, c0:c1]
-                if cell.size > 0:
-                    cell_vars.append(float(cv2.Laplacian(cell, cv2.CV_64F).var()))
-
-        has_patch_blur = False
+        # Method: evaluate both a 6×6 and 8×8 grid so smaller blur-masked
+        # regions (like anonymized faces) still register even when they only
+        # occupy part of a larger cell.
         patch_blur_fraction = 0.0
-        if len(cell_vars) >= 4:
+        has_patch_blur = False
+        for GRID_ROWS, GRID_COLS in ((6, 6), (8, 8)):
+            cell_h = max(1, h_img // GRID_ROWS)
+            cell_w = max(1, w_img // GRID_COLS)
+            cell_vars = []
+            for gr in range(GRID_ROWS):
+                for gc in range(GRID_COLS):
+                    r0, r1 = gr * cell_h, min((gr + 1) * cell_h, h_img)
+                    c0, c1 = gc * cell_w, min((gc + 1) * cell_w, w_img)
+                    cell = img_array[r0:r1, c0:c1]
+                    if cell.size > 0:
+                        cell_vars.append(float(cv2.Laplacian(cell, cv2.CV_64F).var()))
+
+            if len(cell_vars) < 4:
+                continue
+
             median_cell_var = float(np.median(cell_vars))
             max_cell_var    = float(np.max(cell_vars))
             # A cell is "blurry" when its variance is far below the median AND
             # the median itself indicates some cells are genuinely sharp (> 50).
             if median_cell_var > 50 and max_cell_var > 200:
-                blurry_threshold = median_cell_var * 0.20
-                hard_blur_threshold = median_cell_var * 0.05  # near-zero = clearly blurred
+                blurry_threshold = median_cell_var * 0.25
+                hard_blur_threshold = median_cell_var * 0.08  # near-zero = clearly blurred
                 n_blurry = sum(1 for v in cell_vars if v < blurry_threshold)
                 n_hard_blurry = sum(1 for v in cell_vars if v < hard_blur_threshold)
-                patch_blur_fraction = n_blurry / len(cell_vars)
+                current_fraction = n_blurry / len(cell_vars)
+                patch_blur_fraction = max(patch_blur_fraction, current_fraction)
                 # Two-tier trigger:
-                # Tier A: ≥25% cells are blurry (moderate threshold)
-                # Tier B: ≥4 cells are near-zero blurry (strong Gaussian patch blur,
-                #         e.g. face anonymisation with large blur radius)
-                has_patch_blur = (patch_blur_fraction >= 0.25) or (n_hard_blurry >= 4)
+                # Tier A: a meaningful fraction of cells are blurry.
+                # Tier B: a few cells are near-zero blurry, which is enough for
+                #         face anonymisation or other selective blur overlays.
+                has_patch_blur = has_patch_blur or (current_fraction >= 0.20) or (n_hard_blurry >= 3)
 
         # ── 4. DETAIL-LOSS (only meaningful when the image has texture) ───────
         blur_3x3 = cv2.GaussianBlur(img_array, (3, 3), 0)
