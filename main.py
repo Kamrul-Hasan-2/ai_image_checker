@@ -259,10 +259,19 @@ class ImageChecker:
             else:
                 blur_detected = blur_conf >= 0.65
             
-            # Watermark detection is INDEPENDENT of promotional detection
-            # Even product photos can have watermarks (bikroy, daraz, website logos)
+            # Watermark detection: only flag explicit stock-photo/marketplace watermarks.
+            # Text-coverage heuristic is suppressed for confirmed product photos because
+            # products with dense spec labels (UPS back panels, camera bodies, PCBs)
+            # naturally have high text coverage — that is NOT a watermark.
             watermark_risk = ocr_risk * watermark_confidence_ocr
-            watermark_detected = watermark_risk > 0.2 or watermark_keywords or bd_marketplace
+            if is_product_photo and product_photo_confidence > 0.30:
+                # For product photos: only hard watermark signals count.
+                # bikroy/daraz domain text = definite marketplace watermark.
+                # Stock photo services = definite watermark.
+                # Text-coverage-only confidence is ignored.
+                watermark_detected = watermark_keywords or bd_marketplace
+            else:
+                watermark_detected = watermark_risk > 0.2 or watermark_keywords or bd_marketplace
             
             # Check if product text only (from OCR)
             is_product_text_only = ocr_result.get("is_product_text_only", False)
