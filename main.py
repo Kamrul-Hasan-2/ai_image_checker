@@ -25,6 +25,7 @@ from clip_service import CLIPService
 from qwen_service import Qwen2VLService
 from screenshot_detector import compute_screenshot_score, apply_screenshot_decision
 from promotional_detector import detect_promotional_text
+from watermark_detector import detect_watermark_visual
 
 # Create FastAPI app
 app = FastAPI(
@@ -260,21 +261,30 @@ class ImageChecker:
             else:
                 blur_detected = blur_conf >= 0.65
             
-            # Watermark detection: only flag explicit stock-photo/marketplace watermarks.
-            # Text-coverage heuristic is suppressed for confirmed product photos because
-            # products with dense spec labels (UPS back panels, camera bodies, PCBs)
-            # naturally have high text coverage — that is NOT a watermark.
+            # ── DYNAMIC VISUAL WATERMARK DETECTION ───────────────────────────────
+            # Detects watermarks by what they LOOK LIKE, not what they say.
+            # Catches any unknown marketplace logo, diagonal brand stamp, or
+            # attribution strip regardless of language or brand name.
+            visual_wm = detect_watermark_visual(
+                image, is_product_photo, product_photo_confidence
+            )
+            visual_watermark_detected = visual_wm["is_visual_watermark"]
+            print(f"✅ Visual watermark: score={visual_wm['visual_watermark_score']:.3f}, "
+                  f"detected={visual_watermark_detected}, signals={visual_wm['signal_scores']}")
+
+            # ── KEYWORD-BASED WATERMARK DETECTION ────────────────────────────────
+            # Catches known marketplaces (bikroy, daraz, bdstall, shutterstock…)
+            # and seller shop overlays (short text with business name keywords).
+            # Text-coverage heuristic is suppressed for product photos to avoid
+            # false positives from dense spec labels on device bodies.
             watermark_risk = ocr_risk * watermark_confidence_ocr
             if is_product_photo and product_photo_confidence > 0.30:
-                # For confirmed product photos: ignore text-coverage-based confidence
-                # (dense spec text on a product body is NOT a watermark).
-                # Only hard keyword signals count:
-                #   - stock photo services (shutterstock, getty, istock)
-                #   - BD marketplaces (bikroy, daraz)
-                #   - seller shop/store name overlaid on top of the product photo
-                watermark_detected = watermark_keywords or bd_marketplace or seller_watermark
+                keyword_watermark = watermark_keywords or bd_marketplace or seller_watermark
             else:
-                watermark_detected = watermark_risk > 0.2 or watermark_keywords or bd_marketplace or seller_watermark
+                keyword_watermark = watermark_risk > 0.2 or watermark_keywords or bd_marketplace or seller_watermark
+
+            # Final watermark decision: keyword OR visual — either is sufficient
+            watermark_detected = keyword_watermark or visual_watermark_detected
             
             # Check if product text only (from OCR)
             is_product_text_only = ocr_result.get("is_product_text_only", False)
@@ -430,6 +440,10 @@ class ImageChecker:
                     "promo_detector_flags": [h["type"] for h in promo_detection.get("promotional_flags", [])],
                     "promo_detector_reason": promo_detection.get("reason", ""),
                     "promo_unmatched_tokens": promo_detection.get("unmatched_texts", [])[:10],
+                    "watermark_keyword": keyword_watermark,
+                    "watermark_visual_score": visual_wm["visual_watermark_score"],
+                    "watermark_visual_signals": visual_wm["signal_scores"],
+                    "watermark_visual_reasons": visual_wm["reasons"],
                 }
             })
 

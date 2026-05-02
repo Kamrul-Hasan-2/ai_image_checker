@@ -119,38 +119,73 @@ class OCRService:
         full_text = " ".join(all_text)
         full_text_lower = full_text.lower()
         
-        # SIMPLIFIED WATERMARK DETECTION (fewer keywords for speed)
+        # ── WATERMARK KEYWORD LISTS ───────────────────────────────────────────
+        # Stock photo / watermark service names
         watermark_keywords_list = [
-            "shutterstock", "getty", "istock", "watermark"
+            "shutterstock", "getty", "istock", "watermark", "watermarkly",
+            "dreamstime", "123rf", "alamy", "depositphotos",
         ]
 
-        # Bangladesh marketplace watermarks (HIGH PRIORITY)
-        bd_marketplace_keywords = ["bikroy", "daraz"]
+        # Bangladesh marketplace domain watermarks
+        bd_marketplace_keywords = ["bikroy", "daraz", "bdstall", "stall.com"]
 
-        # Seller overlay watermarks — shop/store names stamped on product photos.
-        # "POSTED ON JII MOBILE SHOP", "XYZ Enterprise", "ABC Store" etc.
-        # These are the most common watermark type in BD marketplace images.
+        # BDStall-specific OCR variants — the logo is large and diagonal,
+        # OCR often reads it as partial strings: "stall", "bdsta", "bds", "sta11"
+        # We catch these separately so "stall" in a product title (e.g. "stall
+        # organiser") does not trigger (it would need the image-level context).
+        bdstall_ocr_variants = ["bdstall", "stall", "bdsta", "sta11"]
+
+        # Watermarkly attribution line — appears at image bottom
+        watermarkly_phrases = [
+            "processed using", "free version", "watermarkly",
+            "paid version does not add",
+        ]
+
+        # Seller shop name overlays — stamped on product photos by resellers.
+        # Examples: "POSTED ON JII MOBILE SHOP", "XYZ Enterprise", "Dhaka Bazar"
         seller_overlay_keywords = [
-            "posted on", "mobile shop", "shop", "store", "enterprise",
-            "traders", "trading", "house", "mart", "zone", "center", "centre",
+            "posted on", "mobile shop", "posted by",
+            "shop", "store", "enterprise", "traders", "trading",
+            "house", "mart", "zone", "center", "centre",
             "outlet", "showroom", "bazar", "market", "gallery",
             "international", "corporation", "solutions", "technologies",
             "group", "agency", "supplier", "distributors",
         ]
 
-        # Check for watermark keywords (case-insensitive)
-        watermark_found = any(kw in full_text_lower for kw in watermark_keywords_list)
+        # ── WATERMARK CHECKS ─────────────────────────────────────────────────
+        watermark_found     = any(kw in full_text_lower for kw in watermark_keywords_list)
+        bd_watermark_found  = any(kw in full_text_lower for kw in bd_marketplace_keywords)
 
-        # Check for BD marketplace watermarks
-        bd_watermark_found = any(kw in full_text_lower for kw in bd_marketplace_keywords)
-
-        # Check for seller overlay watermarks.
-        # Require word count <= 12 to avoid flagging products whose brand name
-        # contains one of these words (e.g. a product called "Home Center Brand").
-        # Seller overlay stamps are always short phrases, not full product descriptions.
+        # BDStall logo detection.
+        # Strategy: look for "bdstall" / "stall.com" as unambiguous exact matches,
+        # OR look for "stall" / "bdsta" as a standalone OCR word token (not embedded
+        # in words like "install", "reinstall", "stalling").
+        # We check individual OCR box texts (not the joined string) so we match
+        # "Stall" as its own box even when the full joined text is long.
         _ocr_word_count = len(full_text_lower.split())
+        _ocr_box_texts_lower = [b["text"].lower() for b in extracted_data]
+        bdstall_found = (
+            "bdstall" in full_text_lower
+            or "stall.com" in full_text_lower
+            or any(
+                # Box text is exactly one of the variant strings (standalone OCR box)
+                box_text.strip() in bdstall_ocr_variants
+                for box_text in _ocr_box_texts_lower
+            )
+        )
+        if bdstall_found:
+            bd_watermark_found = True
+
+        # Watermarkly attribution strip at image bottom
+        watermarkly_found = any(ph in full_text_lower for ph in watermarkly_phrases)
+        if watermarkly_found:
+            watermark_found = True
+
+        # Seller overlay watermarks — short OCR text is the key guard.
+        # Dense product spec text (80+ words) will never trigger this.
+        # The APC UPS back panel has 83 words → safely excluded.
         seller_watermark_found = (
-            _ocr_word_count <= 12
+            _ocr_word_count <= 20
             and any(kw in full_text_lower for kw in seller_overlay_keywords)
         )
 
@@ -161,12 +196,12 @@ class OCRService:
         # Calculate text coverage percentage
         text_coverage = (text_area / total_area) * 100 if total_area > 0 else 0
 
-        # Watermark confidence (0.0 to 1.0)
+        # ── WATERMARK CONFIDENCE ─────────────────────────────────────────────
         watermark_confidence = 0.0
         if bd_watermark_found:
-            watermark_confidence = 0.99  # Bikroy/Daraz = definite watermark
+            watermark_confidence = 0.99  # BD marketplace / BDStall = definite
         elif watermark_found:
-            watermark_confidence = 0.95  # Stock photo service watermark
+            watermark_confidence = 0.97  # Stock photo service / Watermarkly
         elif seller_watermark_found:
             watermark_confidence = 0.92  # Seller shop name overlay
         elif text_coverage > 15:
@@ -446,6 +481,8 @@ class OCRService:
             "watermark_keywords_found": watermark_found or bd_watermark_found,
             "seller_watermark_found": seller_watermark_found,
             "bd_marketplace_watermark": bd_watermark_found,
+            "bdstall_watermark": bdstall_found,
+            "watermarkly_found": watermarkly_found,
             "repetitive_text": repetitive_watermark,
             "max_word_repetition": max_repetition,
             "text_coverage_percent": text_coverage,
