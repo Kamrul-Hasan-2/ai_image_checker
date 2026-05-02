@@ -133,6 +133,7 @@ class ImageChecker:
             watermark_confidence_ocr = ocr_result.get("watermark_confidence", 0.0)
             promo_confidence_ocr = ocr_result.get("promotional_confidence", 0.0)
             watermark_keywords = ocr_result.get("watermark_keywords_found", False)
+            seller_watermark = ocr_result.get("seller_watermark_found", False)
             bd_marketplace = ocr_result.get("bd_marketplace_watermark", False)
             has_price = ocr_result.get("has_price", False)
             has_phone_number = ocr_result.get("has_phone_number", False)
@@ -265,13 +266,15 @@ class ImageChecker:
             # naturally have high text coverage — that is NOT a watermark.
             watermark_risk = ocr_risk * watermark_confidence_ocr
             if is_product_photo and product_photo_confidence > 0.30:
-                # For product photos: only hard watermark signals count.
-                # bikroy/daraz domain text = definite marketplace watermark.
-                # Stock photo services = definite watermark.
-                # Text-coverage-only confidence is ignored.
-                watermark_detected = watermark_keywords or bd_marketplace
+                # For confirmed product photos: ignore text-coverage-based confidence
+                # (dense spec text on a product body is NOT a watermark).
+                # Only hard keyword signals count:
+                #   - stock photo services (shutterstock, getty, istock)
+                #   - BD marketplaces (bikroy, daraz)
+                #   - seller shop/store name overlaid on top of the product photo
+                watermark_detected = watermark_keywords or bd_marketplace or seller_watermark
             else:
-                watermark_detected = watermark_risk > 0.2 or watermark_keywords or bd_marketplace
+                watermark_detected = watermark_risk > 0.2 or watermark_keywords or bd_marketplace or seller_watermark
             
             # Check if product text only (from OCR)
             is_product_text_only = ocr_result.get("is_product_text_only", False)

@@ -120,35 +120,57 @@ class OCRService:
         full_text_lower = full_text.lower()
         
         # SIMPLIFIED WATERMARK DETECTION (fewer keywords for speed)
-        watermark_keywords = [
+        watermark_keywords_list = [
             "shutterstock", "getty", "istock", "watermark"
         ]
-        
+
         # Bangladesh marketplace watermarks (HIGH PRIORITY)
         bd_marketplace_keywords = ["bikroy", "daraz"]
-        
+
+        # Seller overlay watermarks — shop/store names stamped on product photos.
+        # "POSTED ON JII MOBILE SHOP", "XYZ Enterprise", "ABC Store" etc.
+        # These are the most common watermark type in BD marketplace images.
+        seller_overlay_keywords = [
+            "posted on", "mobile shop", "shop", "store", "enterprise",
+            "traders", "trading", "house", "mart", "zone", "center", "centre",
+            "outlet", "showroom", "bazar", "market", "gallery",
+            "international", "corporation", "solutions", "technologies",
+            "group", "agency", "supplier", "distributors",
+        ]
+
         # Check for watermark keywords (case-insensitive)
-        watermark_found = any(keyword in full_text_lower for keyword in watermark_keywords)
-        
+        watermark_found = any(kw in full_text_lower for kw in watermark_keywords_list)
+
         # Check for BD marketplace watermarks
-        bd_watermark_found = any(keyword in full_text_lower for keyword in bd_marketplace_keywords)
-        
+        bd_watermark_found = any(kw in full_text_lower for kw in bd_marketplace_keywords)
+
+        # Check for seller overlay watermarks.
+        # Require word count <= 12 to avoid flagging products whose brand name
+        # contains one of these words (e.g. a product called "Home Center Brand").
+        # Seller overlay stamps are always short phrases, not full product descriptions.
+        _ocr_word_count = len(full_text_lower.split())
+        seller_watermark_found = (
+            _ocr_word_count <= 12
+            and any(kw in full_text_lower for kw in seller_overlay_keywords)
+        )
+
         # SKIP word repetition check for speed
         max_repetition = 0
         repetitive_watermark = False
-        
+
         # Calculate text coverage percentage
         text_coverage = (text_area / total_area) * 100 if total_area > 0 else 0
-        
+
         # Watermark confidence (0.0 to 1.0)
         watermark_confidence = 0.0
         if bd_watermark_found:
             watermark_confidence = 0.99  # Bikroy/Daraz = definite watermark
         elif watermark_found:
-            watermark_confidence = 0.95  # Other stock photo watermarks
-            watermark_confidence = 0.90  # Repeated text + coverage (lowered threshold more)
+            watermark_confidence = 0.95  # Stock photo service watermark
+        elif seller_watermark_found:
+            watermark_confidence = 0.92  # Seller shop name overlay
         elif text_coverage > 15:
-            watermark_confidence = 0.75  # Medium text coverage suggests overlay (lowered)
+            watermark_confidence = 0.75  # Medium text coverage suggests overlay
         elif len(all_text) > 5 and text_coverage > 10:
             watermark_confidence = 0.65  # Many text elements suggest watermark
         
@@ -419,9 +441,10 @@ class OCRService:
             "full_text": full_text,
             "extracted_data": extracted_data,
             # Rule-based detection (HIGH CONFIDENCE)
-            "watermark_detected": watermark_found or repetitive_watermark or bd_watermark_found,
+            "watermark_detected": watermark_found or repetitive_watermark or bd_watermark_found or seller_watermark_found,
             "watermark_confidence": watermark_confidence,
             "watermark_keywords_found": watermark_found or bd_watermark_found,
+            "seller_watermark_found": seller_watermark_found,
             "bd_marketplace_watermark": bd_watermark_found,
             "repetitive_text": repetitive_watermark,
             "max_word_repetition": max_repetition,
