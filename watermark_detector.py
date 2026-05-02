@@ -134,16 +134,50 @@ def _detect_transparent_overlay(bgr: np.ndarray) -> Dict[str, Any]:
     contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     min_area = h * w * _MIN_BLOB_FRAC
+
+    # Global image brightness stats: used to exclude plain white/dark backgrounds
+    img_mean = float(gray.mean())
+
     overlay_blobs = []
     for c in contours:
         area = cv2.contourArea(c)
         if area < min_area:
             continue
         x, y, bw, bh = cv2.boundingRect(c)
-        # The blob must not span the entire image (that's just a uniform background)
+
+        # Skip: blob spans the entire image (uniform solid background)
         if bw > w * 0.85 and bh > h * 0.85:
             continue
-        overlay_blobs.append({"area": area, "rect": (x, y, bw, bh)})
+
+        # Skip: blob is a large border/margin region (very close to ALL four edges)
+        touches_left   = x < w * 0.05
+        touches_right  = (x + bw) > w * 0.95
+        touches_top    = y < h * 0.05
+        touches_bottom = (y + bh) > h * 0.95
+        if (touches_left or touches_right) and (touches_top or touches_bottom):
+            # Only skip if it's clearly a corner background, not a centred overlay
+            blob_centre_x = x + bw / 2
+            blob_centre_y = y + bh / 2
+            is_centred = (w * 0.2 < blob_centre_x < w * 0.8 and
+                          h * 0.2 < blob_centre_y < h * 0.8)
+            if not is_centred:
+                continue
+
+        # Skip: blob mean brightness is near-white (>210) AND near image edges
+        # → this is just the white background of a product-on-white-bg photo
+        blob_mean = float(gray[y: y+bh, x: x+bw].mean())
+        is_near_white = blob_mean > 210
+        is_edge_blob  = (x < w * 0.15 or (x + bw) > w * 0.85 or
+                         y < h * 0.15 or (y + bh) > h * 0.85)
+        if is_near_white and is_edge_blob:
+            continue
+
+        # Skip: blob is same brightness as image mean ± 15 (it blends with product,
+        # not overlaid on it) — real overlays have a different tint
+        if abs(blob_mean - img_mean) < 12:
+            continue
+
+        overlay_blobs.append({"area": area, "rect": (x, y, bw, bh), "mean": round(blob_mean, 1)})
 
     has_overlay = len(overlay_blobs) > 0
     # Score: number of blobs, capped, scaled to 0-1
@@ -273,19 +307,32 @@ def _detect_bottom_strip(bgr: np.ndarray) -> Dict[str, Any]:
     # 2. Its std is LOW (uniform background) — the text is small
     # 3. It has some edge content (not completely blank)
 
-    def _strip_score(strip_mean, strip_std, ref_mean) -> float:
-        brightness_diff = abs(strip_mean - ref_mean)
-        is_uniform  = strip_std < 40.0           # background is uniform
-        has_content = strip_std > 5.0            # not blank white
-        is_distinct = brightness_diff > 20.0     # different from product
+    middle_std  = float(middle.std())
 
-        if is_uniform and has_content and is_distinct:
-            # Score proportional to how distinct the strip is
-            return min(brightness_diff / 80.0, 1.0)
+    # Edge density inside the strip — attribution text has fine edges on a calm background.
+    # A plain white margin (no text) has near-zero edge density.
+    edges = cv2.Canny(gray, 30, 100)
+    bot_edge_density = float(edges[h - bottom_h:, :].mean())
+    top_edge_density = float(edges[:top_h, :].mean())
+
+    def _strip_score(strip_mean, strip_std, strip_edge_density, ref_mean, ref_std) -> float:
+        brightness_diff = abs(strip_mean - ref_mean)
+        # Attribution strips (Watermarkly, photo credits) have a specific profile:
+        #   1. Near-white or light-grey background (mean > 175) — always rendered on clean bg
+        #   2. Strip is calmer than the chaotic product area
+        #   3. Has fine text edges (not just blank margin)
+        #   4. Clearly brighter/different from the product body
+        is_light_bg     = strip_mean > 175                 # attribution bg is always light
+        is_more_uniform = strip_std  < ref_std * 0.80      # calmer than product
+        has_text_edges  = strip_edge_density > 2.0         # has fine text, not blank margin
+        is_distinct     = brightness_diff > 45.0           # clearly different from product
+
+        if is_light_bg and is_more_uniform and has_text_edges and is_distinct:
+            return min(brightness_diff / 90.0, 1.0)
         return 0.0
 
-    bot_score = _strip_score(bottom_mean, bottom_std, middle_mean)
-    top_score = _strip_score(top_mean,    top_std,    middle_mean)
+    bot_score = _strip_score(bottom_mean, bottom_std, bot_edge_density, middle_mean, middle_std)
+    top_score = _strip_score(top_mean,    top_std,    top_edge_density, middle_mean, middle_std)
     score     = max(bot_score, top_score)
 
     return {
@@ -408,18 +455,6 @@ def detect_watermark_visual(
     sig_c = _detect_bottom_strip(bgr)
     sig_d = _detect_corner_logo(bgr)
 
-    # ── WEIGHTED COMBINATION ─────────────────────────────────────────────────
-    # Weights reflect how reliable each signal is:
-    # - Diagonal text (B) is the most specific to logo watermarks
-    # - Bottom strip (C) is the most specific to attribution watermarks
-    # - Transparent overlay (A) is broad but reliable
-    # - Corner logo (D) is useful but can fire on product packaging corners
-    weights = {
-        "transparent_overlay": 0.25,
-        "diagonal_text":       0.35,
-        "attribution_strip":   0.25,
-        "corner_logo":         0.15,
-    }
     scores = {
         "transparent_overlay": sig_a["score"],
         "diagonal_text":       sig_b["score"],
@@ -427,21 +462,65 @@ def detect_watermark_visual(
         "corner_logo":         sig_d["score"],
     }
 
-    weighted_score = sum(scores[k] * weights[k] for k in weights)
+    # ── DECISION LOGIC ───────────────────────────────────────────────────────
+    # Rather than a single weighted sum, we use a tiered approach that reflects
+    # what each signal actually means:
+    #
+    #  Tier 1 — Unambiguous single signal (no other signal needed):
+    #    transparent_overlay >= 0.70  →  alpha-blended logo is extremely specific
+    #    attribution_strip   >= 0.60  →  bottom attribution band is very specific
+    #
+    #  Tier 2 — Two independent signals agreeing (each >= 0.30):
+    #    Any combination of 2+ signals → high confidence watermark
+    #
+    #  Tier 3 — Weighted sum fallback for weaker multi-signal cases
 
-    # Boost: if two or more independent signals fire, confidence is higher
-    firing_signals = [k for k, s in scores.items() if s > 0.30]
-    if len(firing_signals) >= 2:
-        # Two independent signals agreeing is much stronger than one alone
-        weighted_score = min(weighted_score * 1.35, 1.0)
+    firing_signals = [k for k, s in scores.items() if s >= 0.30]
 
-    # For confirmed product photos, raise the bar slightly to avoid flagging
-    # product packaging graphics (colourful boxes, diagonal brand text on box)
-    threshold = WATERMARK_SCORE_THRESHOLD
-    if is_product_photo and product_photo_confidence > 0.55:
-        threshold = 0.58
+    is_watermark = False
+    weighted_score = 0.0
+    decision_reason = "none"
 
-    is_watermark = weighted_score >= threshold
+    # Tier 1: single strong signal is sufficient alone.
+    # Only transparent_overlay qualifies — it is the most specific signal
+    # (a semi-transparent alpha-blend patch that is NOT the image background).
+    # attribution_strip alone is too noisy on product-on-white-bg photos
+    # where the white top/bottom margin triggers it falsely.
+    if scores["transparent_overlay"] >= 0.70:
+        weighted_score = scores["transparent_overlay"]
+        is_watermark   = True
+        decision_reason = "transparent_overlay_strong"
+
+    # Tier 2: two or more independent signals agreeing
+    elif len(firing_signals) >= 2:
+        weights = {
+            "transparent_overlay": 0.40,
+            "diagonal_text":       0.30,
+            "attribution_strip":   0.20,
+            "corner_logo":         0.10,
+        }
+        weighted_score = min(
+            sum(scores[k] * weights[k] for k in weights) * 1.40,
+            1.0,
+        )
+        is_watermark   = weighted_score >= WATERMARK_SCORE_THRESHOLD
+        decision_reason = f"multi_signal({','.join(firing_signals)})"
+
+    # Tier 3: weighted sum (single weak signal — conservative)
+    else:
+        weights = {
+            "transparent_overlay": 0.40,
+            "diagonal_text":       0.30,
+            "attribution_strip":   0.20,
+            "corner_logo":         0.10,
+        }
+        weighted_score = sum(scores[k] * weights[k] for k in weights)
+        # For product photos with only one weak signal, raise the bar
+        threshold = 0.60 if (is_product_photo and product_photo_confidence > 0.40) else WATERMARK_SCORE_THRESHOLD
+        is_watermark   = weighted_score >= threshold
+        decision_reason = "weighted_sum_single_signal"
+
+    weighted_score = round(weighted_score, 3)
 
     # Dominant signal = highest individual score
     dominant = max(scores, key=lambda k: scores[k])
@@ -457,8 +536,9 @@ def detect_watermark_visual(
         reasons.append(f"corner_logo(zones={sig_d['logo_zones']})")
 
     return {
-        "visual_watermark_score": round(weighted_score, 3),
+        "visual_watermark_score": weighted_score,
         "is_visual_watermark":    is_watermark,
+        "decision_reason":        decision_reason,
         "signals": {
             "transparent_overlay": sig_a,
             "diagonal_text":       sig_b,
