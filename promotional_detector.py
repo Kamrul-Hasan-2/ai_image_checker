@@ -159,11 +159,16 @@ def classify_ocr_tokens(
 _PROMO_PATTERNS: List[Tuple[str, re.Pattern]] = [
 
     # ── Phone numbers ─────────────────────────────────────────────────────
+    # Rules:
+    #   1. BD mobile must start with 01[3-9] (valid BD prefixes only)
+    #   2. Landline must start with 0 or + to distinguish from model/serial numbers
+    #   3. Bare 10-11 digit run removed — matches barcodes and serial numbers
     ("phone_number",
      re.compile(
-         r'(\+?88)?01[3-9]\d{8}'           # Bangladesh mobile
-         r'|(\+?88)?\d{2,4}[-\s]\d{6,8}'  # Landline with separator
-         r'|\b\d{10,11}\b',                # Any 10-11 digit run
+         r'(\+?88)?01[3-9]\d{8}'              # BD mobile: 01712345678
+         r'|\+88\d{2,4}[-\s]\d{6,8}'          # Landline with +88 country code (prefix required)
+         r'|\+\d{10,13}'                       # International format: +8801712345678
+         r'|(?<!\w)0\d{9,10}(?!\w)',           # Local format starting with 0: 0171234567
          re.IGNORECASE
      )),
 

@@ -10,11 +10,12 @@ from typing import Dict, Tuple, List
 # PHONE NUMBERS
 # ---------------------------------------------------------------------------
 PHONE = re.compile(
-    r'(\+?88)?01[3-9]\d{8}'           # BD mobile: 01XXXXXXXXX
-    r'|(\+?88)?\d{2,4}[-\s]\d{6,8}'  # Landline with separator
-    r'|\b\d{10,11}\b'                  # Any 10–11 digit run
-    r'|[০-৯]{10,11}'                   # Bengali digit mobile
-    r'|০১[০-৯]{9}',                    # Bengali BD mobile
+    r'(\+?88)?01[3-9]\d{8}'              # BD mobile: 01712345678
+    r'|\+88\d{2,4}[-\s]\d{6,8}'          # Landline with +88 country code (prefix required)
+    r'|\+\d{10,13}'                       # International format: +8801712345678
+    r'|(?<!\w)0\d{9,10}(?!\w)'           # Local format starting with 0
+    r'|[০-৯]{10,11}'                      # Bengali digit mobile
+    r'|০১[০-৯]{9}',                       # Bengali BD mobile: ০১XXXXXXXXX
     re.IGNORECASE,
 )
 
