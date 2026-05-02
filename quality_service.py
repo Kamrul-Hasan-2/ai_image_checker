@@ -393,11 +393,11 @@ class QualityCheckService:
             best_lap = max(roi_lap_var, center_lap_var)
         else:
             best_lap = max(laplacian_var, center_lap_var, roi_lap_var)
-        lap_conf = max(0.0, 1.0 - best_lap / 800.0)   # saturates at 0 for lap >= 800
+        lap_conf = max(0.0, 1.0 - best_lap / 500.0)   # saturates at 0 for lap >= 500 (was 800)
         votes.append(lap_conf * 0.28)
 
         # (b) Tenengrad — content-independent, reliable
-        ten_conf = max(0.0, 1.0 - tenengrad_score / 2000.0)
+        ten_conf = max(0.0, 1.0 - tenengrad_score / 1200.0)   # saturates at 0 for ten >= 1200 (was 2000)
         votes.append(ten_conf * 0.22)
 
         # (c) FFT frequency ratio
@@ -414,7 +414,7 @@ class QualityCheckService:
             votes.append(ten_bonus * 0.15)
 
         # (e) Edge density — sparse edges in center suggests blur
-        edge_conf = max(0.0, 1.0 - center_edge_density / 0.08)
+        edge_conf = max(0.0, 1.0 - center_edge_density / 0.06)   # tighter cap (was 0.08)
         votes.append(edge_conf * 0.10)
 
         # (f) Motion blur — only when anisotropy + low sharpness agree
@@ -438,7 +438,7 @@ class QualityCheckService:
         # Do NOT apply the grace margin when selective/patch blur is the trigger —
         # face-blur on a product background is never an acceptable product image.
         if is_product_photo_layout and not has_patch_blur:
-            blur_confidence *= 0.80
+            blur_confidence *= 0.88
 
         # ── 9. THRESHOLDS ────────────────────────────────────────────────────
         # Calibrated so obviously blurry phone-camera shots score > 0.65 and
@@ -457,6 +457,10 @@ class QualityCheckService:
             laplacian_var < 30 and center_lap_var < 30 and roi_lap_var < 30
         ) or (
             snr < 1.5                                       # signal buried in noise
+        ) or (
+            # Clearly blurry: all three lap measures below 80 AND tenengrad is low
+            laplacian_var < 80 and center_lap_var < 80 and roi_lap_var < 80
+            and tenengrad_score < 400
         )
         if absolute_reject:
             blur_confidence = 1.0
