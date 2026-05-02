@@ -270,16 +270,19 @@ class ImageChecker:
 
             # ── KEYWORD-BASED WATERMARK DETECTION ────────────────────────────────
             # Catches known marketplaces (bikroy, daraz, bdstall, shutterstock…)
-            # and seller shop overlays (short text with business name keywords).
-            # Text-coverage heuristic is suppressed for product photos to avoid
-            # false positives from dense spec labels on device bodies.
+            # Seller shop overlays are excluded for product photos since keywords like
+            # "shop", "store", "house", "mart" are common in product names.
             watermark_risk = ocr_risk * watermark_confidence_ocr
             if is_product_photo and product_photo_confidence > 0.30:
-                keyword_watermark = watermark_keywords or bd_marketplace or seller_watermark
+                # For confirmed products: only explicit watermarks or BD marketplace matter
+                # seller_watermark produces too many false positives ("Mobile Shop Display" etc.)
+                keyword_watermark = watermark_keywords or bd_marketplace
             else:
+                # For non-products: apply full watermark check including seller text
                 keyword_watermark = watermark_risk > 0.2 or watermark_keywords or bd_marketplace or seller_watermark
 
             # Final watermark decision: keyword OR visual — either is sufficient
+            # For product photos, visual detector uses a higher threshold (see watermark_detector.py)
             watermark_detected = keyword_watermark or visual_watermark_detected
             
             # Check if product text only (from OCR)

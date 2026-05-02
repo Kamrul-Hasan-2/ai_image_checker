@@ -511,7 +511,10 @@ def detect_watermark_visual(
             sum(scores[k] * weights[k] for k in weights) * 1.40,
             1.0,
         )
-        is_watermark   = weighted_score >= WATERMARK_SCORE_THRESHOLD
+        # For product photos: require higher confidence from multi-signal (0.60 vs 0.50)
+        # This avoids false positives from product graphics being detected as watermark signals
+        threshold = 0.60 if (is_product_photo and product_photo_confidence > 0.40) else WATERMARK_SCORE_THRESHOLD
+        is_watermark   = weighted_score >= threshold
         decision_reason = f"multi_signal({','.join(firing_signals)})"
 
     # Tier 3: weighted sum (single weak signal — conservative)
@@ -523,8 +526,9 @@ def detect_watermark_visual(
             "corner_logo":         0.10,
         }
         weighted_score = sum(scores[k] * weights[k] for k in weights)
-        # For product photos with only one weak signal, raise the bar
-        threshold = 0.60 if (is_product_photo and product_photo_confidence > 0.40) else WATERMARK_SCORE_THRESHOLD
+        # For product photos with only one weak signal, require much higher confidence (0.70)
+        # to avoid false positives from product labels, tags, or branding being detected as watermarks
+        threshold = 0.70 if (is_product_photo and product_photo_confidence > 0.40) else WATERMARK_SCORE_THRESHOLD
         is_watermark   = weighted_score >= threshold
         decision_reason = "weighted_sum_single_signal"
 
