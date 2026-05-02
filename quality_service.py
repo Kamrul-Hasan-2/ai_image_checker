@@ -280,6 +280,45 @@ class QualityCheckService:
 
         is_product_photo_layout = pattern_centered or pattern_filled_frame or pattern_studio_bg
 
+        # ── 3b. PATCH / SELECTIVE BLUR DETECTION ─────────────────────────────
+        # Detects images where only certain rectangular regions are blurred
+        # (e.g. face anonymisation, censored content) while background is sharp.
+        # Global metrics miss this because the sharp background dominates.
+        #
+        # Method: divide image into a 6×6 grid, compute local Laplacian variance
+        # per cell.  If ≥30% of cells are "blurry" (< 20% of the median cell
+        # variance) AND other cells are clearly sharp, we have selective blur.
+        GRID_ROWS, GRID_COLS = 6, 6
+        cell_h = max(1, h_img // GRID_ROWS)
+        cell_w = max(1, w_img // GRID_COLS)
+        cell_vars = []
+        for gr in range(GRID_ROWS):
+            for gc in range(GRID_COLS):
+                r0, r1 = gr * cell_h, min((gr + 1) * cell_h, h_img)
+                c0, c1 = gc * cell_w, min((gc + 1) * cell_w, w_img)
+                cell = img_array[r0:r1, c0:c1]
+                if cell.size > 0:
+                    cell_vars.append(float(cv2.Laplacian(cell, cv2.CV_64F).var()))
+
+        has_patch_blur = False
+        patch_blur_fraction = 0.0
+        if len(cell_vars) >= 4:
+            median_cell_var = float(np.median(cell_vars))
+            max_cell_var    = float(np.max(cell_vars))
+            # A cell is "blurry" when its variance is far below the median AND
+            # the median itself indicates some cells are genuinely sharp (> 50).
+            if median_cell_var > 50 and max_cell_var > 200:
+                blurry_threshold = median_cell_var * 0.20
+                hard_blur_threshold = median_cell_var * 0.05  # near-zero = clearly blurred
+                n_blurry = sum(1 for v in cell_vars if v < blurry_threshold)
+                n_hard_blurry = sum(1 for v in cell_vars if v < hard_blur_threshold)
+                patch_blur_fraction = n_blurry / len(cell_vars)
+                # Two-tier trigger:
+                # Tier A: ≥25% cells are blurry (moderate threshold)
+                # Tier B: ≥4 cells are near-zero blurry (strong Gaussian patch blur,
+                #         e.g. face anonymisation with large blur radius)
+                has_patch_blur = (patch_blur_fraction >= 0.25) or (n_hard_blurry >= 4)
+
         # ── 4. DETAIL-LOSS (only meaningful when the image has texture) ───────
         blur_3x3 = cv2.GaussianBlur(img_array, (3, 3), 0)
         blur_5x5 = cv2.GaussianBlur(img_array, (5, 5), 0)
@@ -381,11 +420,21 @@ class QualityCheckService:
         else:
             votes.append(0.0)
 
+        # (g) Patch / selective blur — face anonymisation, censored regions.
+        # Strong signal: counts as a hard boost when ≥25% of cells are blurry.
+        # Weight is 0.30 so even a modest fraction pushes confidence above threshold.
+        if has_patch_blur:
+            votes.append(min(patch_blur_fraction * 1.20, 1.0) * 0.30)
+        else:
+            votes.append(0.0)
+
         blur_confidence = sum(votes)  # 0.0 = sharp, 1.0 = blurry
 
         # Product layout gives a grace margin: confirmed product photos need a
         # stronger signal before we reject.
-        if is_product_photo_layout:
+        # Do NOT apply the grace margin when selective/patch blur is the trigger —
+        # face-blur on a product background is never an acceptable product image.
+        if is_product_photo_layout and not has_patch_blur:
             blur_confidence *= 0.80
 
         # ── 9. THRESHOLDS ────────────────────────────────────────────────────
@@ -418,6 +467,8 @@ class QualityCheckService:
             quality_issues.append("poor signal quality")
         if is_motion_blurred:
             quality_issues.append("motion blur detected")
+        if has_patch_blur:
+            quality_issues.append(f"selective blur on {int(patch_blur_fraction*100)}% of image regions")
         # Use ROI-aware lap value for human-readable thresholds
         _lap_for_reason = roi_lap_var if has_bright_background else laplacian_var
         if _lap_for_reason < 50:
@@ -450,6 +501,8 @@ class QualityCheckService:
             "roi_lap_var": round(roi_lap_var, 2),
             "has_bright_background": has_bright_background,
             "best_lap_used": round(best_lap, 2),
+            "has_patch_blur": has_patch_blur,
+            "patch_blur_fraction": round(patch_blur_fraction, 3),
             "laplacian_mean": round(laplacian_mean, 3),
             "tenengrad_score": round(tenengrad_score, 2),
             "gradient_std": round(gradient_std, 3),

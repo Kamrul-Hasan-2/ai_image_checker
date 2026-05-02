@@ -252,14 +252,10 @@ class ImageChecker:
             elif ocr_screenshot["flag_for_review"]:
                 print(f"⚠️  Possible screenshot (flag): score={ocr_screenshot['screenshot_score']:.2f}, reasons={ocr_screenshot['reasons']}")
 
-            # Blur: use the confidence score from the new soft-voting system.
-            # If CLIP separately confirms this is a product photo, raise the bar —
-            # a confirmed product photo needs a stronger blur signal to be rejected.
+            # Blur: trust the blur check result directly so the caller uses the
+            # same decision the quality service already made.
             blur_conf = quality_result.get("blur_confidence", 0.0)
-            if is_product_photo and product_photo_confidence > 0.40:
-                blur_detected = blur_conf >= 0.80
-            else:
-                blur_detected = blur_conf >= 0.65
+            blur_detected = not quality_result['checks']['blur']['passed']
             
             # ── DYNAMIC VISUAL WATERMARK DETECTION ───────────────────────────────
             # Detects watermarks by what they LOOK LIKE, not what they say.
