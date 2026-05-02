@@ -210,6 +210,41 @@ class QualityCheckService:
         center_edges_arr = cv2.Canny(center_crop, 50, 150)
         center_edge_density = np.sum(center_edges_arr > 0) / center_edges_arr.size
 
+        # ── 2b. PRODUCT-ROI METRICS (white-background fix) ───────────────────
+        # On studio/white-bg images the flat white background inflates the
+        # global Laplacian, masking an actually-blurry product.  We measure
+        # sharpness only over non-white product pixels.
+        #
+        # Strategy: build a foreground mask (pixels ≤ 230), erode slightly to
+        # strip anti-aliased edges, then compute Laplacian variance only there.
+        # Fall back to center_lap_var when the mask is too small to be reliable.
+        WHITE_THRESH = 230
+        product_mask = (img_array <= WHITE_THRESH).astype(np.uint8)
+        product_pixel_count = int(product_mask.sum())
+        roi_lap_var = center_lap_var  # safe default
+
+        if product_pixel_count > (h_img * w_img * 0.05):  # at least 5% non-white
+            # Erode 3 px to remove background fringe pixels
+            kernel_erode = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            product_mask_eroded = cv2.erode(product_mask, kernel_erode, iterations=2)
+            roi_pixels = product_pixel_count  # use un-eroded count for ratio
+
+            # Laplacian of full image, sampled only over product mask
+            lap_full = cv2.Laplacian(img_array, cv2.CV_64F)
+            masked_values = lap_full[product_mask_eroded > 0]
+            if masked_values.size > 200:  # enough pixels for a stable estimate
+                roi_lap_var = float(np.var(masked_values))
+
+        # bright-background flag — used to decide which variance to trust
+        corners_gray_brightness = [
+            img_array[:h_img // 8, :w_img // 8],
+            img_array[:h_img // 8, -w_img // 8:],
+            img_array[-h_img // 8:, :w_img // 8],
+            img_array[-h_img // 8:, -w_img // 8:],
+        ]
+        avg_corner_brightness_blur = float(np.mean([c.mean() for c in corners_gray_brightness]))
+        has_bright_background = avg_corner_brightness_blur > 200
+
         # ── 3. PRODUCT LAYOUT DETECTION ──────────────────────────────────────
         # Broadened: OR-logic so any of the three patterns qualify.
         y_start, y_end = h_img // 4, 3 * h_img // 4
@@ -308,8 +343,14 @@ class QualityCheckService:
         # No single vote causes rejection. Weights sum to 1.0.
         votes = []
 
-        # (a) Laplacian — use the better of global and center-crop
-        best_lap = max(laplacian_var, center_lap_var)
+        # (a) Laplacian — use the best available estimate:
+        #   • bright background (studio shot): prefer product-ROI variance so the
+        #     flat white area doesn't inflate the signal and mask product blur
+        #   • otherwise: use the better of global and center-crop
+        if has_bright_background:
+            best_lap = max(roi_lap_var, center_lap_var)
+        else:
+            best_lap = max(laplacian_var, center_lap_var, roi_lap_var)
         lap_conf = max(0.0, 1.0 - best_lap / 800.0)   # saturates at 0 for lap >= 800
         votes.append(lap_conf * 0.28)
 
@@ -361,7 +402,7 @@ class QualityCheckService:
         # Kept minimal on purpose: a single clear signal that cannot be a
         # false positive for any legitimate product image.
         absolute_reject = (
-            laplacian_var < 30 and center_lap_var < 30    # completely out-of-focus
+            laplacian_var < 30 and center_lap_var < 30 and roi_lap_var < 30
         ) or (
             snr < 1.5                                       # signal buried in noise
         )
@@ -377,11 +418,13 @@ class QualityCheckService:
             quality_issues.append("poor signal quality")
         if is_motion_blurred:
             quality_issues.append("motion blur detected")
-        if laplacian_var < 50:
+        # Use ROI-aware lap value for human-readable thresholds
+        _lap_for_reason = roi_lap_var if has_bright_background else laplacian_var
+        if _lap_for_reason < 50:
             quality_issues.append("extremely blurry")
-        elif laplacian_var < 150:
+        elif _lap_for_reason < 150:
             quality_issues.append("severely blurry")
-        elif laplacian_var < 300:
+        elif _lap_for_reason < 300:
             quality_issues.append("very blurry")
         if is_noisy:
             quality_issues.append("noisy/grainy")
@@ -404,6 +447,9 @@ class QualityCheckService:
             "border_edge_density": round(border_edge_density_zone, 4),
             "laplacian_var": round(laplacian_var, 2),
             "center_lap_var": round(center_lap_var, 2),
+            "roi_lap_var": round(roi_lap_var, 2),
+            "has_bright_background": has_bright_background,
+            "best_lap_used": round(best_lap, 2),
             "laplacian_mean": round(laplacian_mean, 3),
             "tenengrad_score": round(tenengrad_score, 2),
             "gradient_std": round(gradient_std, 3),

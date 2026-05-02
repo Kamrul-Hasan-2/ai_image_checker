@@ -145,17 +145,21 @@ def _detect_transparent_overlay(bgr: np.ndarray) -> Dict[str, Any]:
             continue
         x, y, bw, bh = cv2.boundingRect(c)
 
-        # Skip: blob spans the entire image (uniform solid background)
-        if bw > w * 0.85 and bh > h * 0.85:
+        # Skip: blob spans most of the image — it's the product body or background,
+        # not a watermark overlay. Threshold: area > 60% of image OR either
+        # dimension > 80% of image side.
+        blob_area_frac = (bw * bh) / (w * h)
+        if blob_area_frac > 0.60:
+            continue
+        if bw > w * 0.80 or bh > h * 0.80:
             continue
 
-        # Skip: blob is a large border/margin region (very close to ALL four edges)
+        # Skip: blob hugs the image boundary on both axes (background margin region)
         touches_left   = x < w * 0.05
         touches_right  = (x + bw) > w * 0.95
         touches_top    = y < h * 0.05
         touches_bottom = (y + bh) > h * 0.95
         if (touches_left or touches_right) and (touches_top or touches_bottom):
-            # Only skip if it's clearly a corner background, not a centred overlay
             blob_centre_x = x + bw / 2
             blob_centre_y = y + bh / 2
             is_centred = (w * 0.2 < blob_centre_x < w * 0.8 and
@@ -317,17 +321,21 @@ def _detect_bottom_strip(bgr: np.ndarray) -> Dict[str, Any]:
 
     def _strip_score(strip_mean, strip_std, strip_edge_density, ref_mean, ref_std) -> float:
         brightness_diff = abs(strip_mean - ref_mean)
-        # Attribution strips (Watermarkly, photo credits) have a specific profile:
-        #   1. Near-white or light-grey background (mean > 175) — always rendered on clean bg
-        #   2. Strip is calmer than the chaotic product area
-        #   3. Has fine text edges (not just blank margin)
-        #   4. Clearly brighter/different from the product body
-        is_light_bg     = strip_mean > 175                 # attribution bg is always light
-        is_more_uniform = strip_std  < ref_std * 0.80      # calmer than product
-        has_text_edges  = strip_edge_density > 2.0         # has fine text, not blank margin
-        is_distinct     = brightness_diff > 45.0           # clearly different from product
+        # Attribution strips (Watermarkly, photo credits) have a very specific profile:
+        #   1. Near-white or light-grey background (mean > 175)
+        #   2. VERY calm — std < 45 absolute (actual Watermarkly strip: std ~59 on the
+        #      original APC watermarked image, but that's with JPEG artefacts; plain
+        #      attribution text on white has std typically 20-55)
+        #   3. Calmer than the product area (relative check)
+        #   4. Has fine text edges — not a blank white margin (edge_density > 2.0)
+        #   5. Clearly brighter than the product body
+        is_light_bg     = strip_mean > 175
+        is_very_uniform = strip_std  < 62                  # absolute cap: product margins can hit 60-100
+        is_more_uniform = strip_std  < ref_std * 0.75      # also calmer than product area
+        has_text_edges  = strip_edge_density > 2.0
+        is_distinct     = brightness_diff > 45.0
 
-        if is_light_bg and is_more_uniform and has_text_edges and is_distinct:
+        if is_light_bg and is_very_uniform and is_more_uniform and has_text_edges and is_distinct:
             return min(brightness_diff / 90.0, 1.0)
         return 0.0
 
