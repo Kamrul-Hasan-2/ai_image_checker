@@ -181,11 +181,14 @@ def _detect_transparent_overlay(bgr: np.ndarray) -> Dict[str, Any]:
         if abs(blob_mean - img_mean) < 12:
             continue
 
-        # Skip: blob that occupies a large contiguous region of the product body
-        # (e.g. a coloured PCB or panel label) — check that the blob area is not
-        # too wide relative to the bounding rect (filled rectangles = product part)
+        # Skip: blob that is a solid filled rectangle — i.e. a product surface, brick,
+        # panel, or any physical object with uniform color. Real watermark overlays are
+        # semi-transparent and sparse (text outlines), not solid filled shapes.
+        # fill_ratio > 0.65 means the contour fills >65% of its bounding box = solid rect.
+        # Lowered area threshold from 0.10 to 0.015: even small solid bricks (~2% of image)
+        # should be excluded — multiple stacked product units each qualify independently.
         fill_ratio = area / max(bw * bh, 1)
-        if fill_ratio > 0.65 and (bw * bh) / (w * h) > 0.10:
+        if fill_ratio > 0.65 and (bw * bh) / (w * h) > 0.015:
             continue
 
         overlay_blobs.append({"area": area, "rect": (x, y, bw, bh), "mean": round(blob_mean, 1)})
@@ -340,12 +343,16 @@ def _detect_bottom_strip(bgr: np.ndarray) -> Dict[str, Any]:
         #      original APC watermarked image, but that's with JPEG artefacts; plain
         #      attribution text on white has std typically 20-55)
         #   3. Calmer than the product area (relative check)
-        #   4. Has fine text edges — not a blank white margin (edge_density > 2.0)
+        #   4. Has fine text edges — not a blank white margin (edge_density > 4.0)
+        #      Raised from 2.0: a plain white wall/floor boundary produces ~1-3 from
+        #      the product edge at the strip boundary; real attribution text is denser.
         #   5. Clearly brighter than the product body
+        #   6. The strip must NOT span nearly the full image width of near-white pixels
+        #      (a white wall / floor background is a scene element, not a banner)
         is_light_bg     = strip_mean > 175
         is_very_uniform = strip_std  < 62                  # absolute cap: product margins can hit 60-100
         is_more_uniform = strip_std  < ref_std * 0.75      # also calmer than product area
-        has_text_edges  = strip_edge_density > 2.0
+        has_text_edges  = strip_edge_density > 4.0         # raised from 2.0 to exclude wall boundaries
         is_distinct     = brightness_diff > 45.0
 
         if is_light_bg and is_very_uniform and is_more_uniform and has_text_edges and is_distinct:
