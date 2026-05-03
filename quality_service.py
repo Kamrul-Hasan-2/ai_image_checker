@@ -323,18 +323,17 @@ class QualityCheckService:
                 has_patch_blur = has_patch_blur or (current_fraction >= 0.20) or (n_hard_blurry >= 3)
 
         # ── 3c. BOTTOM-STRIP BLUR DETECTION ──────────────────────────────────
-        # Catches images where the lower portion is genuinely blurry (censored
-        # band, out-of-focus overlay) but NOT a natural product reflection/shadow.
+        # Catches images where the lower portion (reflection, shadow, or blurred
+        # strip) is significantly softer than the main product body.
+        # Reflections and shadows ARE considered blur problems — they make the
+        # overall image look poor quality regardless of their cause.
         #
-        # Reflection/shadow signatures to EXCLUDE:
-        #   1. Bottom strip is significantly darker than the product body
-        #      (reflections fade to background brightness).
-        #   2. Brightness decreases monotonically downward (gradient fade).
-        #   3. Bottom strip brightness is close to the background corners
-        #      (reflection merges into the surface).
-        #
-        # Only flag when NONE of the reflection guards fire, i.e. the soft
-        # bottom strip is mid-brightness and not fading — a real blurred overlay.
+        # Two-tier check:
+        #   Tier A (strict): bottom is <15% as sharp as top — very strong signal.
+        #   Tier B (moderate): bottom is <30% as sharp AND the bottom strip has
+        #     meaningful content (not just a blank background row): edge density
+        #     in the bottom strip must be >0.005 so we don't flag a clean white
+        #     margin as "blurry".
         has_bottom_strip_blur = False
         bottom_strip_ratio = 1.0
         top_half_lap = 0.0
@@ -348,35 +347,19 @@ class QualityCheckService:
             if top_half_lap > 200:
                 bottom_strip_ratio = bottom_strip_lap / (top_half_lap + 1e-10)
 
-                if bottom_strip_ratio < 0.30:
-                    # ── Reflection / shadow guards ────────────────────────────
-                    top_mean       = float(np.mean(top_region))
-                    bottom_mean    = float(np.mean(bottom_region))
-                    corner_mean    = avg_corner_brightness_blur  # already computed above
+                # Check that bottom strip has some content (not a blank margin)
+                bottom_edges = cv2.Canny(bottom_region, 30, 100)
+                bottom_edge_density = np.sum(bottom_edges > 0) / (bottom_edges.size + 1e-10)
 
-                    # Guard 1: bottom strip is notably darker than product body
-                    # Reflections on bright surfaces dim quickly.
-                    brightness_drop = top_mean - bottom_mean
-                    is_darker_strip = brightness_drop > 20  # >20 grey levels dimmer
+                # Tier A: extremely soft bottom — flag regardless
+                tier_a = bottom_strip_ratio < 0.15
 
-                    # Guard 2: brightness fades downward through the bottom region
-                    # Split bottom region into thirds; a reflection gets darker top→bottom.
-                    bh = bottom_region.shape[0]
-                    if bh >= 3:
-                        t3 = float(np.mean(bottom_region[:bh // 3, :]))
-                        b3 = float(np.mean(bottom_region[2 * bh // 3:, :]))
-                        is_fading_downward = b3 < t3 - 5  # bottom third dimmer than top third
-                    else:
-                        is_fading_downward = False
+                # Tier B: moderately soft bottom with visible content (reflection,
+                # shadow, or out-of-focus strip)
+                tier_b = bottom_strip_ratio < 0.30 and bottom_edge_density > 0.005
 
-                    # Guard 3: bottom strip brightness is close to the background
-                    # (it's blending back into the surface — classic reflection tail).
-                    is_merging_to_bg = abs(bottom_mean - corner_mean) < 30
-
-                    is_reflection = is_darker_strip or is_fading_downward or is_merging_to_bg
-
-                    if not is_reflection:
-                        has_bottom_strip_blur = True
+                if tier_a or tier_b:
+                    has_bottom_strip_blur = True
 
         # ── 4. DETAIL-LOSS (only meaningful when the image has texture) ───────
         blur_3x3 = cv2.GaussianBlur(img_array, (3, 3), 0)
@@ -589,7 +572,6 @@ class QualityCheckService:
             "bottom_strip_ratio": round(bottom_strip_ratio, 4),
             "top_half_lap": round(top_half_lap, 2),
             "bottom_strip_lap": round(bottom_strip_lap, 2),
-            "bottom_strip_is_reflection": (not has_bottom_strip_blur and bottom_strip_ratio < 0.30),
             "laplacian_mean": round(laplacian_mean, 3),
             "tenengrad_score": round(tenengrad_score, 2),
             "gradient_std": round(gradient_std, 3),
