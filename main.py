@@ -105,15 +105,20 @@ class ImageChecker:
             "real estate", "realestate", "property", "apartment",
             "flat", "land", "plot", "house", "office space",
             "commercial property", "residential property",
+            "cow", "cattle", "livestock", "poultry", "goat", "sheep",
+            "buffalo", "animal", "pet", "bird", "fish",
         ]
         # Real-estate category names vary widely; use substring matching so
         # "Residential Real Estate", "Real Estate & Property", etc. all match.
         _real_estate_keywords = ("real estate", "realestate", "property", "apartment",
                                  "flat", "plot", "house", "office space")
+        _livestock_keywords = ("cow", "cattle", "livestock", "poultry", "goat", "sheep",
+                               "buffalo", "animal", "pet", "bird", "fish")
         _cat_lower = category.lower().strip()
         is_exception_category = (
             _cat_lower in exception_categories
             or any(kw in _cat_lower for kw in _real_estate_keywords)
+            or any(kw in _cat_lower for kw in _livestock_keywords)
         )
         
         debug_info = {}

@@ -142,10 +142,17 @@ class ImageChecker:
             "car", "car accessories",
             "bike", "bike accessories",
             "three wheeler", "bicycle", "bicycle accessories",
-            "commercial vehicle", "rental", "vehicle equipment"
+            "commercial vehicle", "rental", "vehicle equipment",
+            "cow", "cattle", "livestock", "poultry", "goat", "sheep",
+            "buffalo", "animal", "pet", "bird", "fish",
         ]
-        
-        is_exception_category = category.lower().strip() in exception_categories
+        _livestock_keywords = ("cow", "cattle", "livestock", "poultry", "goat", "sheep",
+                               "buffalo", "animal", "pet", "bird", "fish")
+        _cat_lower = category.lower().strip()
+        is_exception_category = (
+            _cat_lower in exception_categories
+            or any(kw in _cat_lower for kw in _livestock_keywords)
+        )
         
         try:
             image = self.load_image(image_input)

@@ -322,6 +322,33 @@ class QualityCheckService:
                 #         face anonymisation or other selective blur overlays.
                 has_patch_blur = has_patch_blur or (current_fraction >= 0.20) or (n_hard_blurry >= 3)
 
+        # ── 3c. BOTTOM-STRIP BLUR DETECTION ──────────────────────────────────
+        # Catches images where the lower portion (reflection, bottom banner, or
+        # annotated region like the user's blue-outlined strip) is significantly
+        # softer than the main product above it.  The patch grid misses this when
+        # the sharp product dominates the median and the soft strip is only 1-2
+        # rows of cells.
+        #
+        # Method: compare the Laplacian variance of the bottom 25% of the image
+        # against the top 50% (the "body" of the product).  Flag when:
+        #   • the bottom strip is clearly softer (ratio < 0.30), AND
+        #   • the top is genuinely sharp (lap_var > 200) so we're not comparing
+        #     two equally-blurry halves.
+        has_bottom_strip_blur = False
+        bottom_strip_ratio = 1.0
+        top_half_lap = 0.0
+        bottom_strip_lap = 0.0
+        if h_img > 40:
+            top_region    = img_array[:int(h_img * 0.50), :]
+            bottom_region = img_array[int(h_img * 0.75):, :]
+            top_half_lap      = float(cv2.Laplacian(top_region,    cv2.CV_64F).var())
+            bottom_strip_lap  = float(cv2.Laplacian(bottom_region, cv2.CV_64F).var())
+            if top_half_lap > 200:
+                bottom_strip_ratio = bottom_strip_lap / (top_half_lap + 1e-10)
+                # Strict ratio: bottom must be less than 30% as sharp as the top
+                if bottom_strip_ratio < 0.30:
+                    has_bottom_strip_blur = True
+
         # ── 4. DETAIL-LOSS (only meaningful when the image has texture) ───────
         blur_3x3 = cv2.GaussianBlur(img_array, (3, 3), 0)
         blur_5x5 = cv2.GaussianBlur(img_array, (5, 5), 0)
@@ -431,6 +458,15 @@ class QualityCheckService:
         else:
             votes.append(0.0)
 
+        # (h) Bottom-strip blur — reflection or annotated lower band much softer
+        # than the main product body.  Capped at 0.20 weight: it's a spatial
+        # heuristic, not a global sharpness measure, so it nudges rather than decides.
+        if has_bottom_strip_blur:
+            strip_conf = max(0.0, 1.0 - bottom_strip_ratio / 0.30)  # 0→1 as ratio→0
+            votes.append(strip_conf * 0.20)
+        else:
+            votes.append(0.0)
+
         blur_confidence = sum(votes)  # 0.0 = sharp, 1.0 = blurry
 
         # ── 9. THRESHOLDS ────────────────────────────────────────────────────
@@ -484,6 +520,8 @@ class QualityCheckService:
             quality_issues.append("motion blur detected")
         if has_patch_blur:
             quality_issues.append(f"selective blur on {int(patch_blur_fraction*100)}% of image regions")
+        if has_bottom_strip_blur:
+            quality_issues.append(f"bottom strip blurry (sharpness ratio {bottom_strip_ratio:.2f})")
         # Use ROI-aware lap value for human-readable thresholds
         _lap_for_reason = roi_lap_var if has_bright_background else laplacian_var
         if _lap_for_reason < 50:
@@ -518,6 +556,10 @@ class QualityCheckService:
             "best_lap_used": round(best_lap, 2),
             "has_patch_blur": has_patch_blur,
             "patch_blur_fraction": round(patch_blur_fraction, 3),
+            "has_bottom_strip_blur": has_bottom_strip_blur,
+            "bottom_strip_ratio": round(bottom_strip_ratio, 4),
+            "top_half_lap": round(top_half_lap, 2),
+            "bottom_strip_lap": round(bottom_strip_lap, 2),
             "laplacian_mean": round(laplacian_mean, 3),
             "tenengrad_score": round(tenengrad_score, 2),
             "gradient_std": round(gradient_std, 3),
