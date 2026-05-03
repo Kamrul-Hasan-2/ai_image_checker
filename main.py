@@ -94,15 +94,27 @@ class ImageChecker:
             image_id: Optional image ID to include in response
             position_id: Optional position ID to include in response
         """
-        # Exception categories where promotional_text is always 0
+        # Exception categories where promotional_text is always 0.
+        # Vehicle and real-estate listings legitimately contain price, phone,
+        # and location text as part of the product description — not promotions.
         exception_categories = [
             "car", "car accessories",
             "bike", "bike accessories",
             "three wheeler", "bicycle", "bicycle accessories",
-            "commercial vehicle", "rental", "vehicle equipment"
+            "commercial vehicle", "rental", "vehicle equipment",
+            "real estate", "realestate", "property", "apartment",
+            "flat", "land", "plot", "house", "office space",
+            "commercial property", "residential property",
         ]
-        
-        is_exception_category = category.lower().strip() in exception_categories
+        # Real-estate category names vary widely; use substring matching so
+        # "Residential Real Estate", "Real Estate & Property", etc. all match.
+        _real_estate_keywords = ("real estate", "realestate", "property", "apartment",
+                                 "flat", "plot", "house", "office space")
+        _cat_lower = category.lower().strip()
+        is_exception_category = (
+            _cat_lower in exception_categories
+            or any(kw in _cat_lower for kw in _real_estate_keywords)
+        )
         
         debug_info = {}
         
