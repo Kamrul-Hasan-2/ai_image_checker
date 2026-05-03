@@ -433,20 +433,22 @@ class QualityCheckService:
 
         blur_confidence = sum(votes)  # 0.0 = sharp, 1.0 = blurry
 
-        # Product layout gives a grace margin: confirmed product photos need a
-        # stronger signal before we reject.
-        # Do NOT apply the grace margin when selective/patch blur is the trigger —
-        # face-blur on a product background is never an acceptable product image.
-        if is_product_photo_layout and not has_patch_blur:
-            blur_confidence *= 0.88
-
         # ── 9. THRESHOLDS ────────────────────────────────────────────────────
-        # Calibrated so obviously blurry phone-camera shots score > 0.65 and
-        # sharp white-background product photos score < 0.45.
-        REJECT_THRESHOLD    = 0.65   # was effectively ~0.40 with hard_reject
-        BORDERLINE_THRESHOLD = 0.50
+        # For bright-background (studio/white-bg) product photos we use a lower
+        # reject threshold (0.55) instead of a grace multiplier.
+        # Rationale: a grace multiplier + high threshold creates a double-penalty
+        # that prevents genuinely blurry product images from being detected.
+        # Sharp studio product photos score < 0.45, so 0.55 still gives safe margin.
+        # For non-studio images keep the standard 0.65 threshold.
+        # Selective/patch blur always uses the standard threshold regardless.
+        if has_bright_background and is_product_photo_layout and not has_patch_blur:
+            REJECT_THRESHOLD     = 0.55
+            BORDERLINE_THRESHOLD = 0.42
+        else:
+            REJECT_THRESHOLD     = 0.65
+            BORDERLINE_THRESHOLD = 0.50
 
-        is_blurry    = blur_confidence >= REJECT_THRESHOLD
+        is_blurry     = blur_confidence >= REJECT_THRESHOLD
         is_borderline = BORDERLINE_THRESHOLD <= blur_confidence < REJECT_THRESHOLD
 
         # ── 10. ABSOLUTE FLOOR — only truly catastrophic images ───────────────
@@ -460,7 +462,13 @@ class QualityCheckService:
         ) or (
             # Clearly blurry: all three lap measures below 80 AND tenengrad is low
             laplacian_var < 80 and center_lap_var < 80 and roi_lap_var < 80
-            and tenengrad_score < 400
+            and tenengrad_score < 500
+        ) or (
+            # Soft image with sparse edges: global laplacian is low AND edge density
+            # is sparse. High tenengrad from compression noise or product-boundary edges
+            # can mask this — the laplacian + edge combo is more reliable.
+            # Sharp product images always have edge_density > 0.05 and lap_var > 150.
+            laplacian_var < 100 and edge_density < 0.04
         )
         if absolute_reject:
             blur_confidence = 1.0
