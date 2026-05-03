@@ -322,41 +322,53 @@ class QualityCheckService:
                 #         face anonymisation or other selective blur overlays.
                 has_patch_blur = has_patch_blur or (current_fraction >= 0.20) or (n_hard_blurry >= 3)
 
-        # ── 3c. BOTTOM-STRIP BLUR DETECTION ──────────────────────────────────
-        # Catches images where the lower portion (reflection, shadow, or blurred
-        # strip) is significantly softer than the main product body.
-        # Reflections and shadows ARE considered blur problems — they make the
-        # overall image look poor quality regardless of their cause.
+        # ── 3c. BOTTOM-HALF BLUR DETECTION ───────────────────────────────────
+        # Detects product images where the lower portion contains a blurry
+        # reflection or shadow — a common quality problem in studio product shots.
         #
-        # Two-tier check:
-        #   Tier A (strict): bottom is <15% as sharp as top — very strong signal.
-        #   Tier B (moderate): bottom is <30% as sharp AND the bottom strip has
-        #     meaningful content (not just a blank background row): edge density
-        #     in the bottom strip must be >0.005 so we don't flag a clean white
-        #     margin as "blurry".
+        # Sampling strategy (tuned for typical product-on-surface shots):
+        #   • "product zone"    = top 40% — the sharp product body lives here
+        #   • "reflection zone" = rows 45%–75% — where reflections start
+        #   • "bottom strip"    = bottom 25% — tail of reflection / background
+        #
+        # We take the MAX sharpness across the two lower zones so a reflection
+        # that starts mid-frame is always caught even if the very bottom is plain
+        # background. We compare against the product zone sharpness.
+        #
+        # Guard: require bottom edge density > 0.003 so a totally blank white
+        # margin (no content at all) is never mistaken for a blurry region.
         has_bottom_strip_blur = False
         bottom_strip_ratio = 1.0
         top_half_lap = 0.0
         bottom_strip_lap = 0.0
+        bottom_edge_density = 0.0
         if h_img > 40:
-            top_region    = img_array[:int(h_img * 0.50), :]
-            bottom_region = img_array[int(h_img * 0.75):, :]
-            top_half_lap     = float(cv2.Laplacian(top_region,    cv2.CV_64F).var())
-            bottom_strip_lap = float(cv2.Laplacian(bottom_region, cv2.CV_64F).var())
+            product_zone   = img_array[:int(h_img * 0.40), :]           # sharp product
+            reflect_zone   = img_array[int(h_img * 0.45):int(h_img * 0.75), :]  # reflection band
+            tail_zone      = img_array[int(h_img * 0.75):, :]           # tail / bg
 
-            if top_half_lap > 200:
+            top_half_lap        = float(cv2.Laplacian(product_zone,  cv2.CV_64F).var())
+            reflect_lap         = float(cv2.Laplacian(reflect_zone,  cv2.CV_64F).var())
+            tail_lap            = float(cv2.Laplacian(tail_zone,     cv2.CV_64F).var())
+
+            # Use the softer of the two lower zones as the signal
+            # (worst-case blur in the lower half)
+            bottom_strip_lap = max(reflect_lap, tail_lap)
+
+            # Edge density across full lower half (rows 45%–end)
+            lower_half = img_array[int(h_img * 0.45):, :]
+            lower_edges = cv2.Canny(lower_half, 30, 100)
+            bottom_edge_density = float(np.sum(lower_edges > 0) / (lower_edges.size + 1e-10))
+
+            if top_half_lap > 150 and bottom_edge_density > 0.003:
                 bottom_strip_ratio = bottom_strip_lap / (top_half_lap + 1e-10)
 
-                # Check that bottom strip has some content (not a blank margin)
-                bottom_edges = cv2.Canny(bottom_region, 30, 100)
-                bottom_edge_density = np.sum(bottom_edges > 0) / (bottom_edges.size + 1e-10)
+                # Tier A: very strong — bottom is less than 20% as sharp as product
+                tier_a = bottom_strip_ratio < 0.20
 
-                # Tier A: extremely soft bottom — flag regardless
-                tier_a = bottom_strip_ratio < 0.15
-
-                # Tier B: moderately soft bottom with visible content (reflection,
-                # shadow, or out-of-focus strip)
-                tier_b = bottom_strip_ratio < 0.30 and bottom_edge_density > 0.005
+                # Tier B: moderately soft — bottom is less than 40% as sharp
+                # (catches lighter reflections that are still visually distracting)
+                tier_b = bottom_strip_ratio < 0.40
 
                 if tier_a or tier_b:
                     has_bottom_strip_blur = True
@@ -470,12 +482,12 @@ class QualityCheckService:
         else:
             votes.append(0.0)
 
-        # (h) Bottom-strip blur — reflection or annotated lower band much softer
-        # than the main product body.  Capped at 0.20 weight: it's a spatial
-        # heuristic, not a global sharpness measure, so it nudges rather than decides.
+        # (h) Bottom-half blur — reflection/shadow lower half much softer than
+        # product body. Weight 0.35: strong enough to push past threshold on its
+        # own for clear reflections, since this is a direct spatial measurement.
         if has_bottom_strip_blur:
-            strip_conf = max(0.0, 1.0 - bottom_strip_ratio / 0.30)  # 0→1 as ratio→0
-            votes.append(strip_conf * 0.20)
+            strip_conf = max(0.0, 1.0 - bottom_strip_ratio / 0.40)  # 0→1 as ratio→0
+            votes.append(strip_conf * 0.35)
         else:
             votes.append(0.0)
 
@@ -572,6 +584,7 @@ class QualityCheckService:
             "bottom_strip_ratio": round(bottom_strip_ratio, 4),
             "top_half_lap": round(top_half_lap, 2),
             "bottom_strip_lap": round(bottom_strip_lap, 2),
+            "bottom_edge_density": round(bottom_edge_density, 4),
             "laplacian_mean": round(laplacian_mean, 3),
             "tenengrad_score": round(tenengrad_score, 2),
             "gradient_std": round(gradient_std, 3),
