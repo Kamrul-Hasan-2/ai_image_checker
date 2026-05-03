@@ -322,56 +322,66 @@ class QualityCheckService:
                 #         face anonymisation or other selective blur overlays.
                 has_patch_blur = has_patch_blur or (current_fraction >= 0.20) or (n_hard_blurry >= 3)
 
-        # ── 3c. BOTTOM-HALF BLUR DETECTION ───────────────────────────────────
-        # Detects product images where the lower portion contains a blurry
-        # reflection or shadow — a common quality problem in studio product shots.
+        # ── 3c. REFLECTION / SHADOW DETECTION ────────────────────────────────
+        # Products on reflective surfaces show a soft mirrored copy below the
+        # product. This looks blurry and is a quality defect.
         #
-        # Sampling strategy (tuned for typical product-on-surface shots):
-        #   • "product zone"    = top 40% — the sharp product body lives here
-        #   • "reflection zone" = rows 45%–75% — where reflections start
-        #   • "bottom strip"    = bottom 25% — tail of reflection / background
-        #
-        # We take the MAX sharpness across the two lower zones so a reflection
-        # that starts mid-frame is always caught even if the very bottom is plain
-        # background. We compare against the product zone sharpness.
-        #
-        # Guard: require bottom edge density > 0.003 so a totally blank white
-        # margin (no content at all) is never mistaken for a blurry region.
+        # Key insight: the product can sit anywhere vertically (top, middle, or
+        # bottom of frame). Fixed-zone comparisons fail when the product is
+        # centred with background above AND below. Instead we:
+        #   1. Scan 10% row bands to find the SHARPEST band (product peak).
+        #   2. Find the band immediately below the product that has visible
+        #      content (edge_density > 0.005) but is much softer — the reflection.
+        #   3. Compare reflection sharpness to product peak sharpness.
         has_bottom_strip_blur = False
-        bottom_strip_ratio = 1.0
-        top_half_lap = 0.0
-        bottom_strip_lap = 0.0
-        bottom_edge_density = 0.0
-        if h_img > 40:
-            product_zone   = img_array[:int(h_img * 0.40), :]           # sharp product
-            reflect_zone   = img_array[int(h_img * 0.45):int(h_img * 0.75), :]  # reflection band
-            tail_zone      = img_array[int(h_img * 0.75):, :]           # tail / bg
+        bottom_strip_ratio    = 1.0
+        top_half_lap          = 0.0   # product peak lap (reused in details)
+        bottom_strip_lap      = 0.0   # reflection band lap
+        bottom_edge_density   = 0.0
 
-            top_half_lap        = float(cv2.Laplacian(product_zone,  cv2.CV_64F).var())
-            reflect_lap         = float(cv2.Laplacian(reflect_zone,  cv2.CV_64F).var())
-            tail_lap            = float(cv2.Laplacian(tail_zone,     cv2.CV_64F).var())
+        BAND = max(1, h_img // 10)   # 10% bands
+        band_laps  = []
+        band_edges = []
+        for i in range(10):
+            r0 = i * BAND
+            r1 = min((i + 1) * BAND, h_img)
+            band = img_array[r0:r1, :]
+            bl = float(cv2.Laplacian(band, cv2.CV_64F).var())
+            be_arr = cv2.Canny(band, 30, 100)
+            be = float(np.sum(be_arr > 0) / (be_arr.size + 1e-10))
+            band_laps.append(bl)
+            band_edges.append(be)
 
-            # Use the softer of the two lower zones as the signal
-            # (worst-case blur in the lower half)
-            bottom_strip_lap = max(reflect_lap, tail_lap)
+        # Find the sharpest band that also has real content (edge_density>0.01)
+        peak_idx = -1
+        peak_lap = 0.0
+        for i, (bl, be) in enumerate(zip(band_laps, band_edges)):
+            if be > 0.01 and bl > peak_lap:
+                peak_lap = bl
+                peak_idx = i
 
-            # Edge density across full lower half (rows 45%–end)
-            lower_half = img_array[int(h_img * 0.45):, :]
-            lower_edges = cv2.Canny(lower_half, 30, 100)
-            bottom_edge_density = float(np.sum(lower_edges > 0) / (lower_edges.size + 1e-10))
+        top_half_lap = peak_lap  # product sharpness reference
 
-            if top_half_lap > 150 and bottom_edge_density > 0.003:
-                bottom_strip_ratio = bottom_strip_lap / (top_half_lap + 1e-10)
+        if peak_idx >= 0 and peak_lap > 150:
+            # Look at bands BELOW the product peak for a soft reflection band
+            # A reflection band: has some edges (> 0.005) but much lower lap
+            best_reflect_lap = None
+            best_reflect_edge = 0.0
+            for i in range(peak_idx + 1, 10):
+                bl = band_laps[i]
+                be = band_edges[i]
+                if be > 0.005:   # has visible content — not blank background
+                    ratio_i = bl / (peak_lap + 1e-10)
+                    if ratio_i < 0.40:   # significantly softer than product
+                        if best_reflect_lap is None or bl > best_reflect_lap:
+                            best_reflect_lap  = bl
+                            best_reflect_edge = be
 
-                # Tier A: very strong — bottom is less than 20% as sharp as product
-                tier_a = bottom_strip_ratio < 0.20
-
-                # Tier B: moderately soft — bottom is less than 40% as sharp
-                # (catches lighter reflections that are still visually distracting)
-                tier_b = bottom_strip_ratio < 0.40
-
-                if tier_a or tier_b:
-                    has_bottom_strip_blur = True
+            if best_reflect_lap is not None:
+                bottom_strip_lap    = best_reflect_lap
+                bottom_edge_density = best_reflect_edge
+                bottom_strip_ratio  = bottom_strip_lap / (peak_lap + 1e-10)
+                has_bottom_strip_blur = True
 
         # ── 4. DETAIL-LOSS (only meaningful when the image has texture) ───────
         blur_3x3 = cv2.GaussianBlur(img_array, (3, 3), 0)
@@ -482,12 +492,13 @@ class QualityCheckService:
         else:
             votes.append(0.0)
 
-        # (h) Bottom-half blur — reflection/shadow lower half much softer than
-        # product body. Weight 0.35: strong enough to push past threshold on its
-        # own for clear reflections, since this is a direct spatial measurement.
+        # (h) Reflection/shadow blur — a band below the product is much softer.
+        # Weight 0.65: this is a direct spatial measurement with very high
+        # signal confidence. A ratio of 0.03 (reflection is 3% as sharp as the
+        # product) is unambiguous and must trigger detection on its own.
         if has_bottom_strip_blur:
             strip_conf = max(0.0, 1.0 - bottom_strip_ratio / 0.40)  # 0→1 as ratio→0
-            votes.append(strip_conf * 0.35)
+            votes.append(strip_conf * 0.65)
         else:
             votes.append(0.0)
 
@@ -502,6 +513,13 @@ class QualityCheckService:
         # For non-studio images keep the standard 0.65 threshold.
         # Selective/patch blur always uses the standard threshold regardless.
         if has_bright_background and is_product_photo_layout and not has_patch_blur:
+            REJECT_THRESHOLD     = 0.55
+            BORDERLINE_THRESHOLD = 0.42
+        elif has_bottom_strip_blur and is_product_photo_layout and not has_patch_blur:
+            # Product on a reflective surface: the reflection IS the defect.
+            # These images have bright-ish backgrounds that just miss the 200
+            # corner threshold, but are still studio shots. Use the same
+            # lenient reject threshold so the reflection vote can decide.
             REJECT_THRESHOLD     = 0.55
             BORDERLINE_THRESHOLD = 0.42
         else:
