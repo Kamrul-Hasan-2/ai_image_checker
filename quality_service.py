@@ -222,6 +222,8 @@ class QualityCheckService:
         product_mask = (img_array <= WHITE_THRESH).astype(np.uint8)
         product_pixel_count = int(product_mask.sum())
         roi_lap_var = center_lap_var  # safe default
+        product_mask_eroded = product_mask  # safe default for section 2c
+        lap_full = cv2.Laplacian(img_array, cv2.CV_64F)  # computed once, reused
 
         if product_pixel_count > (h_img * w_img * 0.05):  # at least 5% non-white
             # Erode 3 px to remove background fringe pixels
@@ -229,11 +231,29 @@ class QualityCheckService:
             product_mask_eroded = cv2.erode(product_mask, kernel_erode, iterations=2)
             roi_pixels = product_pixel_count  # use un-eroded count for ratio
 
-            # Laplacian of full image, sampled only over product mask
-            lap_full = cv2.Laplacian(img_array, cv2.CV_64F)
             masked_values = lap_full[product_mask_eroded > 0]
             if masked_values.size > 200:  # enough pixels for a stable estimate
                 roi_lap_var = float(np.var(masked_values))
+
+        # ── 2c. SURFACE TEXTURE SHARPNESS (interior pixels only) ─────────────
+        # Steel jars and rims produce very high Laplacian at their edges, which
+        # inflates roi_lap_var and masks soft product surface texture.
+        # We measure sharpness only on INTERIOR product pixels — non-white AND
+        # away from strong edges — to get a clean surface-texture signal.
+        surface_lap_var = roi_lap_var  # safe default
+        if product_pixel_count > (h_img * w_img * 0.05):
+            # Build a "strong edge" mask using gradient magnitude
+            grad_mag = np.sqrt(gx**2 + gy**2)
+            # Pixels with gradient > 30 are edge/rim pixels — exclude them
+            edge_pixel_mask = (grad_mag > 30).astype(np.uint8)
+            # Interior = product mask AND not near a strong edge
+            # Dilate edge mask slightly to exclude rim halos
+            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            edge_pixel_mask_dilated = cv2.dilate(edge_pixel_mask, kernel_dilate, iterations=1)
+            interior_mask = (product_mask_eroded > 0) & (edge_pixel_mask_dilated == 0)
+            interior_values = lap_full[interior_mask]
+            if interior_values.size > 300:
+                surface_lap_var = float(np.var(interior_values))
 
         # bright-background flag — used to decide which variance to trust
         corners_gray_brightness = [
@@ -447,11 +467,17 @@ class QualityCheckService:
         votes = []
 
         # (a) Laplacian — use the best available estimate:
-        #   • bright background (studio shot): prefer product-ROI variance so the
-        #     flat white area doesn't inflate the signal and mask product blur
+        #   • bright background (studio shot): use surface_lap_var (interior
+        #     product pixels excluding rims/edges) so sharp steel rims on jars
+        #     don't mask soft product surface texture. Fall back to roi if surface
+        #     mask was too small.
         #   • otherwise: use the better of global and center-crop
         if has_bright_background:
-            best_lap = max(roi_lap_var, center_lap_var)
+            # For studio shots use surface_lap_var (interior pixels, no rims) as
+            # the primary signal. If the interior mask was too small to be reliable
+            # (surface_lap_var == roi_lap_var fallback), use roi_lap_var instead.
+            # Never use center_lap_var here — jar rims in the center crop inflate it.
+            best_lap = surface_lap_var
         else:
             best_lap = max(laplacian_var, center_lap_var, roi_lap_var)
         lap_conf = max(0.0, 1.0 - best_lap / 500.0)   # saturates at 0 for lap >= 500 (was 800)
@@ -594,6 +620,7 @@ class QualityCheckService:
             "laplacian_var": round(laplacian_var, 2),
             "center_lap_var": round(center_lap_var, 2),
             "roi_lap_var": round(roi_lap_var, 2),
+            "surface_lap_var": round(surface_lap_var, 2),
             "has_bright_background": has_bright_background,
             "best_lap_used": round(best_lap, 2),
             "has_patch_blur": has_patch_blur,
