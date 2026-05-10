@@ -455,6 +455,126 @@ def _detect_corner_logo(bgr: np.ndarray) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# SIGNAL E — Diagonal bright glare / light-wash overlay
+# ---------------------------------------------------------------------------
+
+def _detect_diagonal_glare(bgr: np.ndarray) -> Dict[str, Any]:
+    """
+    Detect a large bright glare/light-wash overlay on a non-white background
+    product image (e.g. HP laptop with a diagonal specular highlight covering
+    30-50% of the product surface).
+
+    Key characteristics of this defect:
+    - The overall image is NOT white-background (median brightness < 190)
+    - A large contiguous region (15-65% of image) is distinctly brighter
+      than the product body (brightness > product_mean + 40)
+    - The bright region has a diagonal boundary — detected by checking
+      whether the left and right column extents of the bright mask change
+      monotonically top-to-bottom (i.e. slanted boundary)
+    - The bright region overlaps actual product pixels (not just bg margin)
+
+    Diagonal boundary check: for each row scan the leftmost/rightmost
+    bright pixel. If those x-positions vary significantly across rows
+    (std > 8% of image width) the boundary is slanted, not a horizontal band.
+    """
+    h, w = bgr.shape[:2]
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+    img_median = float(np.median(gray))
+    # Skip white-background images entirely
+    if img_median > 190:
+        return {"signal": "diagonal_glare", "score": 0.0, "detected": False}
+
+    # Use the 85th percentile as the bright threshold — pixels brighter than
+    # 85% of the image are "unusually bright" regardless of absolute value.
+    # This adapts to both dark and medium-toned images.
+    p85 = float(np.percentile(gray, 85))
+    # But also require an absolute minimum brightness (must be actually bright)
+    bright_thresh = max(p85, 170)
+
+    bright_mask = (gray > bright_thresh).astype(np.uint8) * 255
+
+    # Strip image border
+    border = max(4, int(min(h, w) * 0.03))
+    bright_mask[:border, :] = 0
+    bright_mask[-border:, :] = 0
+    bright_mask[:, :border] = 0
+    bright_mask[:, -border:] = 0
+
+    # Morphological close to fill small gaps
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (12, 12))
+    closed = cv2.morphologyEx(bright_mask, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    min_area = h * w * 0.07   # at least 7% of image
+    max_area = h * w * 0.65   # but not the whole image
+    best_score = 0.0
+    detected = False
+
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_area or area > max_area:
+            continue
+
+        x, y, bw, bh = cv2.boundingRect(c)
+
+        # Blob must not span the full image (that's the background)
+        if bw > w * 0.95 and bh > h * 0.95:
+            continue
+
+        # ── Diagonal boundary check ──────────────────────────────────────
+        # Scan leftmost and rightmost bright pixel per row inside this blob.
+        # High std of these x-positions = slanted boundary = diagonal glare.
+        blob_mask_roi = closed[y:y+bh, x:x+bw]
+        left_xs  = []
+        right_xs = []
+        for row_i in range(blob_mask_roi.shape[0]):
+            row_data = blob_mask_roi[row_i]
+            bright_cols = np.where(row_data > 0)[0]
+            if len(bright_cols) > 0:
+                left_xs.append(int(bright_cols[0]))
+                right_xs.append(int(bright_cols[-1]))
+
+        if len(left_xs) < 10:
+            continue
+
+        left_std  = float(np.std(left_xs))
+        right_std = float(np.std(right_xs))
+        boundary_slant = max(left_std, right_std) / (w + 1e-6)
+
+        # Require a meaningful slant: x-positions vary by > 5% of image width
+        if boundary_slant < 0.05:
+            continue
+
+        # ── Verify the glare is distinctly brighter than surrounding area ──
+        # The blob mean must be meaningfully brighter than the non-blob area.
+        # This prevents flagging a naturally bright object on a bright bg.
+        outside_mask = (closed == 0) & (gray > 20)  # non-blob, non-black
+        blob_actual_mask = closed[y:y+bh, x:x+bw] > 0
+        blob_mean_brightness = float(np.mean(gray[y:y+bh, x:x+bw][blob_actual_mask])) if np.sum(blob_actual_mask) > 0 else bright_thresh
+        if np.sum(outside_mask) > 100:
+            outside_median = float(np.median(gray[outside_mask]))
+            # Blob must be at least 25 grey levels brighter than surroundings
+            if blob_mean_brightness - outside_median < 25:
+                continue
+
+        # ── Score ────────────────────────────────────────────────────────
+        area_frac  = area / (h * w)
+        slant_norm = min(boundary_slant / 0.20, 1.0)
+        score = min(area_frac * 3.5, 1.0) * 0.60 + slant_norm * 0.40
+        if score > best_score:
+            best_score = score
+            detected = True
+
+    return {
+        "signal":   "diagonal_glare",
+        "score":    round(best_score, 3),
+        "detected": detected,
+    }
+
+
+# ---------------------------------------------------------------------------
 # MAIN PUBLIC FUNCTION
 # ---------------------------------------------------------------------------
 
@@ -487,12 +607,14 @@ def detect_watermark_visual(
     sig_b = _detect_diagonal_text(bgr)
     sig_c = _detect_bottom_strip(bgr)
     sig_d = _detect_corner_logo(bgr)
+    sig_e = _detect_diagonal_glare(bgr)
 
     scores = {
         "transparent_overlay": sig_a["score"],
         "diagonal_text":       sig_b["score"],
         "attribution_strip":   sig_c["score"],
         "corner_logo":         sig_d["score"],
+        "diagonal_glare":      sig_e["score"],
     }
 
     # ── DECISION LOGIC ───────────────────────────────────────────────────────
@@ -515,22 +637,27 @@ def detect_watermark_visual(
     decision_reason = "none"
 
     # Tier 1: single strong signal is sufficient alone.
-    # Only transparent_overlay qualifies — it is the most specific signal
-    # (a semi-transparent alpha-blend patch that is NOT the image background).
-    # attribution_strip alone is too noisy on product-on-white-bg photos
-    # where the white top/bottom margin triggers it falsely.
+    # transparent_overlay: semi-transparent alpha-blend patch — very specific.
+    # diagonal_glare: large diagonal bright overlay crossing product area —
+    #   unambiguous when it covers 15%+ of the image at a diagonal angle.
     if scores["transparent_overlay"] >= 0.70:
         weighted_score = scores["transparent_overlay"]
         is_watermark   = True
         decision_reason = "transparent_overlay_strong"
 
+    elif scores["diagonal_glare"] >= 0.30:
+        weighted_score = scores["diagonal_glare"]
+        is_watermark   = True
+        decision_reason = "diagonal_glare_strong"
+
     # Tier 2: two or more independent signals agreeing
     elif len(firing_signals) >= 2:
         weights = {
-            "transparent_overlay": 0.40,
-            "diagonal_text":       0.30,
-            "attribution_strip":   0.20,
+            "transparent_overlay": 0.35,
+            "diagonal_text":       0.25,
+            "attribution_strip":   0.15,
             "corner_logo":         0.10,
+            "diagonal_glare":      0.15,
         }
         weighted_score = min(
             sum(scores[k] * weights[k] for k in weights) * 1.40,
@@ -545,10 +672,11 @@ def detect_watermark_visual(
     # Tier 3: weighted sum (single weak signal — conservative)
     else:
         weights = {
-            "transparent_overlay": 0.40,
-            "diagonal_text":       0.30,
-            "attribution_strip":   0.20,
+            "transparent_overlay": 0.35,
+            "diagonal_text":       0.25,
+            "attribution_strip":   0.15,
             "corner_logo":         0.10,
+            "diagonal_glare":      0.15,
         }
         weighted_score = sum(scores[k] * weights[k] for k in weights)
         # For product photos with only one weak signal, require much higher confidence (0.75)
@@ -571,6 +699,8 @@ def detect_watermark_visual(
         reasons.append(f"attribution_strip(score={scores['attribution_strip']:.2f})")
     if scores["corner_logo"] > 0.30:
         reasons.append(f"corner_logo(zones={sig_d['logo_zones']})")
+    if scores["diagonal_glare"] > 0.30:
+        reasons.append(f"diagonal_glare(score={scores['diagonal_glare']:.2f})")
 
     return {
         "visual_watermark_score": weighted_score,
@@ -581,6 +711,7 @@ def detect_watermark_visual(
             "diagonal_text":       sig_b,
             "attribution_strip":   sig_c,
             "corner_logo":         sig_d,
+            "diagonal_glare":      sig_e,
         },
         "signal_scores":   {k: round(v, 3) for k, v in scores.items()},
         "firing_signals":  firing_signals,
