@@ -27,6 +27,12 @@ transformers==4.48.2
 qwen-vl-utils==0.0.8
 accelerate>=0.26.0
 
+# Groq cloud API (qwen3-32b)
+groq>=0.9.0
+
+# .env file support
+python-dotenv>=1.0.0
+
 # Optional (uncomment if needed for specific deployments)
 # modal==0.71.21
 # runpod==1.7.9

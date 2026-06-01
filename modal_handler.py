@@ -6,10 +6,20 @@ Clean implementation with GPU snapshot optimization
 import modal
 import base64
 import io
+import os
 import requests
 from PIL import Image
 from typing import Dict, Any
 import traceback
+
+# Load .env flags early
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except ImportError:
+    pass
+
+from qwen_service import USE_QWEN2VL, GROQ_API_KEY, get_qwen_service, groq_moderate_image
 
 # Create Modal app
 app = modal.App("ai-image-checker")
@@ -23,16 +33,20 @@ def download_models():
     
     print("Downloading models...")
     
-    from transformers import CLIPModel, CLIPProcessor, Qwen2VLForConditionalGeneration, AutoProcessor
-    
+    from transformers import CLIPModel, CLIPProcessor
+
     CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
     CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-    
-    Qwen2VLForConditionalGeneration.from_pretrained(
-        "Qwen/Qwen2-VL-2B-Instruct",
-        trust_remote_code=True
-    )
-    AutoProcessor.from_pretrained("Qwen/Qwen2-VL-2B-Instruct", trust_remote_code=True)
+
+    if USE_QWEN2VL:
+        from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+        Qwen2VLForConditionalGeneration.from_pretrained(
+            "Qwen/Qwen2-VL-2B-Instruct", trust_remote_code=True
+        )
+        AutoProcessor.from_pretrained("Qwen/Qwen2-VL-2B-Instruct", trust_remote_code=True)
+        print("✅ Qwen2-VL model downloaded")
+    else:
+        print("⏭️  Qwen2-VL download skipped (USE_QWEN2VL=False)")
     
     import easyocr
     os.makedirs('/root/.cache/easyocr', exist_ok=True)
@@ -95,12 +109,18 @@ class ImageChecker:
         from quality_service import QualityCheckService
         from ocr_service import OCRService
         from clip_service import CLIPService
-        from qwen_service import Qwen2VLService
-        
         self.quality_service = QualityCheckService()
         self.ocr_service = OCRService(languages=['en'])
         self.clip_service = CLIPService(model_name="openai/clip-vit-base-patch32")
-        self.qwen2b_service = Qwen2VLService(model_name="Qwen/Qwen2-VL-2B-Instruct")
+
+        self.qwen2b_service = get_qwen_service()
+        if self.qwen2b_service:
+            print("✅ Qwen2-VL local model loaded")
+        else:
+            print("⏭️  Qwen2-VL disabled (USE_QWEN2VL=False)")
+
+        if GROQ_API_KEY:
+            print(f"✅ Groq API configured (model: qwen/qwen3-32b)")
     
     def load_image(self, image_input: str) -> Image.Image:
         """Load image from URL or base64"""
@@ -245,11 +265,30 @@ class ImageChecker:
             # CLIP analysis (skipped for speed - can be enabled if needed)
             clip_risk = 0.0
             
-            # SKIP Qwen2-VL for speed - rely only on fast OCR detection
+            # Qwen2-VL / Groq moderation — controlled by .env flags
             qwen_risk = 0.0
             qwen_promo_score = 0.0
             qwen_watermark_score = 0.0
             qwen_illegal_score = 0.0
+
+            if self.qwen2b_service:
+                try:
+                    qwen_result = self.qwen2b_service.moderate_image(image)
+                    qwen_risk            = 1.0 if qwen_result.get("decision") == "BLOCK" else 0.0
+                    qwen_promo_score     = 1.0 if qwen_result.get("is_promotional") else 0.0
+                    qwen_watermark_score = 1.0 if qwen_result.get("has_watermark") else 0.0
+                    qwen_illegal_score   = 1.0 if "illegal_content" in qwen_result.get("violations", []) else 0.0
+                except Exception as qe:
+                    print(f"⚠️  Qwen2-VL error: {qe}")
+            elif GROQ_API_KEY:
+                try:
+                    qwen_result = groq_moderate_image(image)
+                    qwen_risk            = 1.0 if qwen_result.get("decision") == "BLOCK" else 0.0
+                    qwen_promo_score     = 1.0 if qwen_result.get("is_promotional") else 0.0
+                    qwen_watermark_score = 1.0 if qwen_result.get("has_watermark") else 0.0
+                    qwen_illegal_score   = 1.0 if "illegal_content" in qwen_result.get("violations", []) else 0.0
+                except Exception as ge:
+                    print(f"⚠️  Groq error: {ge}")
             
             # Calculate final scores - only flag clear mobile UI screenshots
             screenshot_detected = screenshot_confidence > 0.90

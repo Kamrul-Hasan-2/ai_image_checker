@@ -8,29 +8,71 @@ import os
 import sys
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from typing import Dict, Any
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Dict, Any, List, Optional
 import base64
 import io
 import requests
 from PIL import Image
 import traceback
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+# Thread pool for running blocking CPU/IO work concurrently
+_executor = ThreadPoolExecutor(max_workers=8)
+
+
+# ---------------------------------------------------------------------------
+# Request / Response models — makes /docs show a proper interactive form
+# ---------------------------------------------------------------------------
+class ImageItem(BaseModel):
+    id: int = Field(..., example=1)
+    position_id: int = Field(..., example=1)
+    image: str = Field(..., example="https://cdn.bdstall.com/product-image/sample.jpg")
+
+class CheckRequest(BaseModel):
+    category: str = Field(..., example="laptop")
+    title: Optional[str] = Field(None, example="HP EliteBook 840 G8")
+    description: Optional[str] = Field(None, example="14 inch business laptop with Intel Core i5")
+    images: List[ImageItem] = Field(..., example=[{"id": 1, "position_id": 1, "image": "https://cdn.bdstall.com/product-image/sample.jpg"}])
+    pipeline: Optional[str] = Field("full", example="full")
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Load .env before importing services so flags are set
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except ImportError:
+    pass  # dotenv optional — values can be set as real env vars
 
 # Import services
 from quality_service import QualityCheckService
 from ocr_service import OCRService
 from clip_service import CLIPService
-from qwen_service import Qwen2VLService
+from qwen_service import USE_QWEN2VL, GROQ_API_KEY, get_qwen_service, groq_moderate_image
 from screenshot_detector import compute_screenshot_score, apply_screenshot_decision
 from promotional_detector import detect_promotional_text
 from watermark_detector import detect_watermark_visual
 
 # Create FastAPI app
 app = FastAPI(
-    title="AI Image Checker", 
-    version="1.0.0"
+    title="AI Image Checker",
+    version="1.0.0",
+    description="AI-powered image quality and content moderation API",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+
+# CORS — allow all origins so /docs Swagger UI and external callers work
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Global service instances
@@ -53,7 +95,19 @@ class ImageChecker:
             self.quality_service = QualityCheckService()
             self.ocr_service = OCRService(languages=['en'])
             self.clip_service = CLIPService(model_name="openai/clip-vit-base-patch32")
-            self.qwen2b_service = Qwen2VLService(model_name="Qwen/Qwen2-VL-2B-Instruct")
+
+            # Qwen2-VL local model — only load when USE_QWEN2VL=True in .env
+            self.qwen2b_service = get_qwen_service()
+            if self.qwen2b_service:
+                print("✅ Qwen2-VL local model loaded")
+            else:
+                print("⏭️  Qwen2-VL disabled (USE_QWEN2VL=False)")
+
+            if GROQ_API_KEY:
+                print(f"✅ Groq API configured (model: qwen/qwen3-32b)")
+            else:
+                print("⏭️  Groq API not configured (GROQ_API_KEY not set)")
+
             print("✅ All services initialized successfully")
         except Exception as e:
             print(f"❌ Error initializing services: {e}")
@@ -81,7 +135,7 @@ class ImageChecker:
         except Exception as e:
             raise ValueError(f"Failed to load image: {str(e)}")
     
-    def process_single_image(self, image_input: str, category: str, pipeline_mode: str, title: str = None, description: str = None, image_id: int = None, position_id: int = None) -> Dict[str, Any]:
+    async def process_single_image(self, image_input: str, category: str, pipeline_mode: str, title: str = None, description: str = None, image_id: int = None, position_id: int = None) -> Dict[str, Any]:
         """
         Process a single image through the AI pipeline
         
@@ -127,26 +181,32 @@ class ImageChecker:
             print(f"\n🔍 Processing image (ID: {image_id}, Position: {position_id})")
             print(f"   Category: {category}, Title: {title}, Description: {description}")
             
-            image = self.load_image(image_input)
+            loop = asyncio.get_event_loop()
+
+            # Download image
+            image = await loop.run_in_executor(_executor, self.load_image, image_input)
             print(f"✅ Image loaded: {image.size}")
-            
-            # CRITICAL: Quality check BEFORE resizing - blur detection needs full resolution
-            quality_result = self.quality_service.check_image(image)
-            opencv_risk = quality_result.get("opencv_risk", 0.0)
-            screenshot_confidence = quality_result.get("screenshot_confidence", 0.0)
-            blur_confidence = quality_result.get("blur_confidence", 0.0)
-            print(f"✅ Quality check done - blur: {blur_confidence:.2f}, screenshot: {screenshot_confidence:.2f}")
-            
-            # Resize for optimal OCR/CLIP processing (balance speed vs accuracy)
-            # Note: Quality check done BEFORE resize to preserve blur detection accuracy
-            max_size = 800  # Resize to 800x800 for AI processing
+
+            # Resize copy for OCR/CLIP (quality check needs full resolution)
+            max_size = 800
             if max(image.size) > max_size:
                 ratio = max_size / max(image.size)
                 new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
-                image = image.resize(new_size, Image.Resampling.LANCZOS)
-            
-            # OCR analysis
-            ocr_result = self.ocr_service.extract_text(image)
+                image_small = image.resize(new_size, Image.Resampling.LANCZOS)
+            else:
+                image_small = image
+
+            # Quality check (full res) + OCR (small) — run concurrently
+            quality_result, ocr_result = await asyncio.gather(
+                loop.run_in_executor(_executor, self.quality_service.check_image, image),
+                loop.run_in_executor(_executor, self.ocr_service.extract_text, image_small),
+            )
+            image = image_small  # switch to small image for remaining steps
+
+            opencv_risk           = quality_result.get("opencv_risk", 0.0)
+            screenshot_confidence = quality_result.get("screenshot_confidence", 0.0)
+            blur_confidence       = quality_result.get("blur_confidence", 0.0)
+            print(f"✅ Quality+OCR done - blur: {blur_confidence:.2f}, text: {ocr_result.get('full_text','')[:40]}...")
             ocr_risk = ocr_result.get("ocr_risk", 0.0)
             watermark_confidence_ocr = ocr_result.get("watermark_confidence", 0.0)
             promo_confidence_ocr = ocr_result.get("promotional_confidence", 0.0)
@@ -189,29 +249,29 @@ class ImageChecker:
             if promo_detection_confidence == 0 and not promotional_detected_ocr:
                 has_promotional_sticker = False
 
-            # CRITICAL: Check if image shows actual product (using CLIP)
-            # If it's a product photo, text on it is part of the product, NOT promotional
-            product_check = self.clip_service.detect_product_photo(image)
-            is_product_photo = product_check.get("is_product_photo", False)
-            product_photo_confidence = product_check.get("product_score", 0.0)
-            print(f"✅ CLIP product check: is_product_photo={is_product_photo}, conf={product_photo_confidence:.2f}")
-            
-            # NEW STEP 1: Verify image body content matches expected product
-            # Check if the image actually shows what it's supposed to (e.g., RAM, phone, camera)
-            # This prevents promotional images from being misclassified
-            image_body_match = False
-            body_match_confidence = 0.0
-            
-            if has_title_or_description := bool(title or description):
-                # Use CLIP to verify image content matches product title/description
-                body_verification = self.clip_service.verify_image_body_content(
-                    image, 
-                    title or "", 
-                    description or ""
+            # CLIP product check + body verification — run both concurrently
+            # Use a 224px image for CLIP (its native resolution — no quality loss)
+            clip_img = image.resize((224, 224), Image.Resampling.BILINEAR)
+            has_title_or_description = bool(title or description)
+
+            if has_title_or_description:
+                product_check, body_verification = await asyncio.gather(
+                    loop.run_in_executor(_executor, self.clip_service.detect_product_photo, clip_img),
+                    loop.run_in_executor(_executor, self.clip_service.verify_image_body_content,
+                                         clip_img, title or "", description or ""),
                 )
-                image_body_match = body_verification.get("body_matches", False)
+                image_body_match      = body_verification.get("body_matches", False)
                 body_match_confidence = body_verification.get("confidence", 0.0)
-                print(f"✅ Body verification: matches={image_body_match}, conf={body_match_confidence:.2f}")
+            else:
+                product_check = await loop.run_in_executor(
+                    _executor, self.clip_service.detect_product_photo, clip_img
+                )
+                image_body_match      = False
+                body_match_confidence = 0.0
+
+            is_product_photo        = product_check.get("is_product_photo", False)
+            product_photo_confidence = product_check.get("product_score", 0.0)
+            print(f"✅ CLIP done: product={is_product_photo}({product_photo_confidence:.2f}), body_match={image_body_match}({body_match_confidence:.2f})")
             
             # NEW STEP 2: Check if product title/description matches OCR text
             # If title/description provided but doesn't match OCR = PROMOTIONAL (mismatch)
@@ -249,8 +309,8 @@ class ImageChecker:
             
             # CLIP analysis (skipped for speed - can be enabled if needed)
             clip_risk = 0.0
-            
-            # SKIP Qwen2-VL for speed - rely only on fast OCR detection
+
+            # Qwen/Groq scores initialised here — set later in watermark block
             qwen_risk = 0.0
             qwen_promo_score = 0.0
             qwen_watermark_score = 0.0
@@ -275,12 +335,29 @@ class ImageChecker:
             blur_detected = not quality_result['checks']['blur']['passed']
             
             # ── DYNAMIC VISUAL WATERMARK DETECTION ───────────────────────────────
-            # Detects watermarks by what they LOOK LIKE, not what they say.
-            # Catches any unknown marketplace logo, diagonal brand stamp, or
-            # attribution strip regardless of language or brand name.
-            visual_wm = detect_watermark_visual(
-                image, is_product_photo, product_photo_confidence
-            )
+            # Run watermark detection + Groq (if enabled) concurrently
+            wm_fn = lambda: detect_watermark_visual(image, is_product_photo, product_photo_confidence)
+
+            if self.qwen2b_service:
+                visual_wm, qwen_raw = await asyncio.gather(
+                    loop.run_in_executor(_executor, wm_fn),
+                    loop.run_in_executor(_executor, self.qwen2b_service.moderate_image, image),
+                )
+            elif GROQ_API_KEY:
+                visual_wm, qwen_raw = await asyncio.gather(
+                    loop.run_in_executor(_executor, wm_fn),
+                    loop.run_in_executor(_executor, groq_moderate_image, image),
+                )
+            else:
+                visual_wm = await loop.run_in_executor(_executor, wm_fn)
+                qwen_raw  = None
+
+            if qwen_raw:
+                qwen_risk            = 1.0 if qwen_raw.get("decision") == "BLOCK" else 0.0
+                qwen_promo_score     = 1.0 if qwen_raw.get("is_promotional") else 0.0
+                qwen_watermark_score = 1.0 if qwen_raw.get("has_watermark") else 0.0
+                qwen_illegal_score   = 1.0 if "illegal_content" in qwen_raw.get("violations", []) else 0.0
+
             visual_watermark_detected = visual_wm["is_visual_watermark"]
             print(f"✅ Visual watermark: score={visual_wm['visual_watermark_score']:.3f}, "
                   f"detected={visual_watermark_detected}, signals={visual_wm['signal_scores']}")
@@ -498,73 +575,68 @@ class ImageChecker:
             
             return error_result
     
-    def check_image(self, job_input: Dict[str, Any]) -> Dict[str, Any]:
+    async def check_image(self, job_input: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Main handler - supports single or multiple images
+        Main handler - processes multiple images in parallel.
         """
         try:
-            pipeline_mode = job_input.get("pipeline", "full")
-            
-            # Multiple images
+            pipeline_mode    = job_input.get("pipeline", "full")
+            common_category  = job_input.get("category", "unknown")
+            common_title     = job_input.get("title")
+            common_description = job_input.get("description")
+
+            # Multiple images — process ALL concurrently
             if "images" in job_input:
                 images_list = job_input.get("images", [])
-                
                 if not images_list:
                     return {"error": "No images provided"}
-                
-                # Get common fields (shared across all images)
-                common_category = job_input.get("category", "unknown")
-                common_title = job_input.get("title")  # Optional product title
-                common_description = job_input.get("description")  # Optional product description
-                
-                results = []
+
+                tasks = []
                 for img_data in images_list:
                     image_input = img_data.get("image")
-                    # Allow per-image override, but use common values by default
-                    category = img_data.get("category", common_category)
-                    title = img_data.get("title", common_title)
+                    category    = img_data.get("category", common_category)
+                    title       = img_data.get("title", common_title)
                     description = img_data.get("description", common_description)
-                    # Extract id and position_id if provided
-                    image_id = img_data.get("id")
+                    image_id    = img_data.get("id")
                     position_id = img_data.get("position_id")
-                    
+
                     if not image_input:
-                        # Build error result with id and position_id first (if provided)
-                        error_result = {}
-                        if image_id is not None:
-                            error_result["id"] = image_id
-                        if position_id is not None:
-                            error_result["position_id"] = position_id
-                        error_result.update({
-                            "error": "No image URL provided",
-                            "risk_level": 0
-                        })
-                        results.append(error_result)
+                        err = {}
+                        if image_id   is not None: err["id"]          = image_id
+                        if position_id is not None: err["position_id"] = position_id
+                        err.update({"error": "No image URL provided", "risk_level": 0})
+                        async def _err(e=err):
+                            return e
+                        tasks.append(_err())
                     else:
-                        result = self.process_single_image(image_input, category, pipeline_mode, title, description, image_id, position_id)
-                        results.append(result)
-                
-                return results
-            
+                        tasks.append(self.process_single_image(
+                            image_input, category, pipeline_mode,
+                            title, description, image_id, position_id
+                        ))
+
+                # All images run at the same time
+                results = await asyncio.gather(*tasks, return_exceptions=False)
+                return list(results)
+
             # Single image
             else:
                 image_input = job_input.get("image")
-                category = job_input.get("category", "unknown")
-                title = job_input.get("title")  # Optional product title
-                description = job_input.get("description")  # Optional product description
-                image_id = job_input.get("id")  # Optional image ID
-                position_id = job_input.get("position_id")  # Optional position ID
-                
+                category    = job_input.get("category", "unknown")
+                title       = job_input.get("title")
+                description = job_input.get("description")
+                image_id    = job_input.get("id")
+                position_id = job_input.get("position_id")
+
                 if not image_input:
                     return {"error": "No image provided"}
-                
-                return self.process_single_image(image_input, category, pipeline_mode, title, description, image_id, position_id)
-            
+
+                return await self.process_single_image(
+                    image_input, category, pipeline_mode,
+                    title, description, image_id, position_id
+                )
+
         except Exception as e:
-            return {
-                "error": str(e),
-                "traceback": traceback.format_exc()
-            }
+            return {"error": str(e), "traceback": traceback.format_exc()}
 
 
 # FastAPI Startup Event
@@ -578,23 +650,29 @@ async def startup_event():
 
 
 # API Endpoints
-@app.post("/image_checker")
-@app.post("/image_checker/")
-async def process_image(data: Dict[str, Any]):
-    """HTTP endpoint to check images"""
+@app.post("/image_checker", summary="Check images for quality and content issues")
+@app.post("/image_checker/", include_in_schema=False)
+async def process_image(data: CheckRequest):
+    """
+    Analyze product images for:
+    - **blur** — out-of-focus or low-sharpness images
+    - **watermark** — visual or text watermarks
+    - **promotional_text** — overlaid marketing/promo text
+    - **screenshot** — screenshots instead of real product photos
+    - **category_mismatch** — image doesn't match the listed category
+    - **illegal** — prohibited content
+    - **stock_photo** — generic stock images
+    """
     if image_checker is None:
         raise HTTPException(status_code=503, detail="Services not initialized")
-    
-    return image_checker.check_image(data)
+    return await image_checker.check_image(data.model_dump())
 
 
-@app.post("/image_checker/check")
-async def check_endpoint(data: Dict[str, Any]):
-    """Alternative /check endpoint"""
+@app.post("/image_checker/check", summary="Alternative check endpoint", include_in_schema=False)
+async def check_endpoint(data: CheckRequest):
     if image_checker is None:
         raise HTTPException(status_code=503, detail="Services not initialized")
-    
-    return image_checker.check_image(data)
+    return await image_checker.check_image(data.model_dump())
 
 
 @app.get("/image_checker/health")
@@ -651,6 +729,8 @@ def main():
     print("\nAPI Documentation:")
     print(f"  - POST http://{args.host}:{args.port}/image_checker/ - Check images")
     print(f"  - GET  http://{args.host}:{args.port}/image_checker/health - Health check")
+    print(f"  - GET  http://{args.host}:{args.port}/docs  - Swagger UI (interactive docs)")
+    print(f"  - GET  http://{args.host}:{args.port}/redoc - ReDoc UI")
     print("="*60)
     
     uvicorn.run(

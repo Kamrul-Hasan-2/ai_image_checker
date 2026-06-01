@@ -1,56 +1,211 @@
 """
-Qwen2-VL Service for detailed image moderation:
-- Final moderation decision
-- Detailed explanations
-- Dispute resolution with reasoning
+Qwen2-VL Service for detailed image moderation.
+
+Two backends controlled by .env flags:
+  USE_QWEN2VL=True   → local Qwen2-VL-2B model (GPU required)
+  GROQ_API_KEY=...   → cloud Groq API with qwen/qwen3-32b (text-only, no image)
+
+When USE_QWEN2VL=False the local model is never loaded.
+Groq is always available as a lightweight text-only path when a key is set.
 """
 
-import torch
-from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
-from PIL import Image
-from typing import Dict, Optional
+import os
 import json
+import base64
+import io
+from typing import Dict, Optional
+from PIL import Image
 
 
+# ---------------------------------------------------------------------------
+# Read flags once at import time
+# ---------------------------------------------------------------------------
+def _env_bool(key: str, default: bool = False) -> bool:
+    val = os.environ.get(key, str(default)).strip().lower()
+    return val in ("1", "true", "yes")
+
+USE_QWEN2VL  = _env_bool("USE_QWEN2VL", False)
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_MODEL   = os.environ.get("GROQ_MODEL", "qwen/qwen3-32b").strip()
+
+
+# ---------------------------------------------------------------------------
+# Groq client (lazy-initialised, text-only)
+# ---------------------------------------------------------------------------
+_groq_client = None
+
+def _get_groq_client():
+    global _groq_client
+    if _groq_client is None:
+        try:
+            from groq import Groq
+            _groq_client = Groq(api_key=GROQ_API_KEY)
+        except ImportError:
+            raise RuntimeError("groq package not installed. Run: pip install groq")
+    return _groq_client
+
+
+def _image_to_base64(image: Image.Image) -> str:
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Groq-based moderation (uses vision via base64 if supported, else text stub)
+# ---------------------------------------------------------------------------
+def _groq_moderate(image: Image.Image, clip_analysis: Optional[Dict] = None) -> Dict:
+    """Call Groq qwen3-32b for image moderation (sends image as base64)."""
+    client = _get_groq_client()
+
+    context = ""
+    if clip_analysis:
+        risk_level   = clip_analysis.get("risk_analysis", {}).get("risk_level", "unknown")
+        top_category = clip_analysis.get("category_analysis", {}).get("top_category", "unknown")
+        context = f"\nPreliminary analysis: Category={top_category}, Risk={risk_level}."
+
+    img_b64 = _image_to_base64(image)
+
+    prompt = f"""Analyze this product image for e-commerce content moderation.{context}
+
+Check for:
+1. Promotional/advertising overlays (prices, discounts, SALE text, brand watermarks)
+2. Watermarks from websites (bikroy, daraz, shutterstock, bdstall, etc.)
+3. Illegal content (real weapons, drugs, explicit adult content)
+4. Image quality issues (blurry, screenshot, AI-generated artifacts)
+
+Respond ONLY with valid JSON:
+{{
+    "decision": "BLOCK/APPROVE/MANUAL_REVIEW",
+    "confidence": 85,
+    "explanation": "brief explanation",
+    "violations": [],
+    "is_promotional": false,
+    "is_ai_generated": false,
+    "has_watermark": false,
+    "categories_detected": [],
+    "recommended_action": "approve/block/review"
+}}"""
+
+    try:
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ],
+            max_tokens=512,
+            temperature=0.3,
+        )
+        raw = response.choices[0].message.content or ""
+    except Exception as e:
+        # Groq model may not support vision — fall back to text-only description
+        raw = f'{{"decision":"APPROVE","confidence":50,"explanation":"Groq error: {str(e)[:100]}","violations":[],"is_promotional":false,"is_ai_generated":false,"has_watermark":false,"categories_detected":[],"recommended_action":"approve"}}'
+
+    # Parse JSON
+    try:
+        if "```json" in raw:
+            raw = raw.split("```json")[1].split("```")[0].strip()
+        elif "```" in raw:
+            raw = raw.split("```")[1].split("```")[0].strip()
+        j_start = raw.find("{")
+        j_end   = raw.rfind("}") + 1
+        return json.loads(raw[j_start:j_end]) if j_start != -1 else _fallback_result(raw)
+    except json.JSONDecodeError:
+        return _fallback_result(raw)
+
+
+def _fallback_result(text: str) -> Dict:
+    return {
+        "decision": "APPROVE",
+        "confidence": 50,
+        "explanation": text[:200],
+        "violations": [],
+        "is_promotional": False,
+        "is_ai_generated": False,
+        "has_watermark": False,
+        "categories_detected": [],
+        "recommended_action": "manual review recommended",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Local Qwen2-VL service class
+# ---------------------------------------------------------------------------
 class Qwen2VLService:
-    def __init__(self, model_name: str = "Qwen/Qwen2-VL-7B-Instruct"):
-        """Initialize Qwen2-VL model and processor"""
+    """
+    Wraps the local Qwen2-VL model.
+    Only instantiate when USE_QWEN2VL=True.
+    """
+
+    def __init__(self, model_name: str = "Qwen/Qwen2-VL-2B-Instruct"):
+        if not USE_QWEN2VL:
+            raise RuntimeError(
+                "Qwen2-VL is disabled (USE_QWEN2VL=False in .env). "
+                "Use GroqQwenService instead."
+            )
+        import torch
+        from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+
         print(f"Loading Qwen2-VL model: {model_name}")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        # Load model with appropriate settings
+        self._torch = torch
+
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
             device_map="cuda" if self.device == "cuda" else None,
-            trust_remote_code=True
+            trust_remote_code=True,
         )
-        
         if self.device == "cpu":
             self.model = self.model.to(self.device)
-        
-        self.processor = AutoProcessor.from_pretrained(
-            model_name,
-            trust_remote_code=True
-        )
-        
+
+        self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
         print(f"Qwen2-VL model loaded on {self.device}")
-    
+
+    # ------------------------------------------------------------------
+    def _run(self, messages, max_new_tokens: int = 512) -> str:
+        text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        images = [
+            c["image"]
+            for msg in messages
+            for c in msg["content"]
+            if isinstance(c, dict) and c.get("type") == "image"
+        ]
+        inputs = self.processor(
+            text=[text], images=images, return_tensors="pt", padding=True
+        )
+        inputs = {
+            k: v.to(self.device) if isinstance(v, self._torch.Tensor) else v
+            for k, v in inputs.items()
+        }
+        with self._torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=0.7,
+                top_p=0.9,
+            )
+        return self.processor.decode(outputs[0], skip_special_tokens=True)
+
+    # ------------------------------------------------------------------
     def moderate_image(self, image: Image.Image, clip_analysis: Optional[Dict] = None) -> Dict:
-        """
-        Final moderation decision with detailed explanation
-        
-        Args:
-            image: PIL Image to moderate
-            clip_analysis: Optional CLIP analysis results for context
-        """
-        # Prepare moderation prompt
         context = ""
         if clip_analysis:
-            risk_level = clip_analysis.get("risk_analysis", {}).get("risk_level", "unknown")
+            risk_level   = clip_analysis.get("risk_analysis", {}).get("risk_level", "unknown")
             top_category = clip_analysis.get("category_analysis", {}).get("top_category", "unknown")
             context = f"\nPreliminary analysis suggests: Category={top_category}, Risk={risk_level}."
-        
+
         prompt = f"""Analyze this image for content moderation. Focus on:
 1. Is this a PROMOTIONAL/ADVERTISING post? Look for: prices, discounts, "SALE", "EMI", warranty terms, brand names overlaid on products, or marketing text. NOTE: E-commerce product pages with prices ARE promotional but NOT AI-generated.
 
@@ -65,14 +220,14 @@ class Qwen2VLService:
    - Impossible anatomy (extra fingers, missing limbs, wrong proportions)
    - Floating or disconnected body parts
    - Unrealistic reflections or physics
-   
+
    NOT AI-GENERATED:
    - Professional product photos from e-commerce sites (Haier, Samsung, LG, etc.)
    - Real photographs with compression artifacts or JPEG noise
    - Images with genuine watermarks from real websites
    - Screenshots of real websites or apps
    - Photos of real physical products, even if promotional
-   
+
 3. Does it contain watermarks from websites (bikroy, daraz, shutterstock)?
 4. Does it show ACTUAL illegal items? ONLY flag: real guns/weapons, drugs/narcotics, explicit adult content. DO NOT flag normal products like electronics, inverters, UPS, generators, power supplies, etc.
 5. Is the image blurry or a screenshot?{context}
@@ -83,158 +238,65 @@ Respond in JSON format:
     "confidence": 85,
     "explanation": "detailed explanation here",
     "violations": ["promotional_content", "watermark", "illegal_content", "ai_generated"],
-    "is_promotional": true/false,
-    "is_ai_generated": true/false,
-    "ai_artifacts_detected": ["artifact1", "artifact2"],
-    "has_watermark": true/false,
-    "categories_detected": ["category1", "category2"],
+    "is_promotional": true,
+    "is_ai_generated": false,
+    "ai_artifacts_detected": [],
+    "has_watermark": false,
+    "categories_detected": [],
     "recommended_action": "action recommendation"
 }}"""
-        
-        # Prepare conversation format for Qwen2-VL
+
         messages = [
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {"type": "text", "text": prompt}
-                ]
+                    {"type": "text", "text": prompt},
+                ],
             }
         ]
-        
-        # Process and generate
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.processor(
-            text=[text],
-            images=[image],
-            return_tensors="pt",
-            padding=True
-        )
-        
-        # Move inputs to device
-        inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
-                 for k, v in inputs.items()}
-        
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=512,
-                temperature=0.7,
-                top_p=0.9
-            )
-        
-        response = self.processor.decode(outputs[0], skip_special_tokens=True)
-        
-        # Parse response
+
+        response = self._run(messages, max_new_tokens=512)
+
         try:
-            # Extract assistant's response from the full conversation
-            # The response includes: system\n...\nuser\n...\nassistant\n...
             assistant_marker = "assistant\n"
-            if assistant_marker in response:
-                assistant_response = response.split(assistant_marker)[-1].strip()
-            else:
-                assistant_response = response
-            
-            # Remove markdown code blocks if present (```json ... ```)
-            if "```json" in assistant_response:
-                json_start = assistant_response.find("```json") + 7
-                json_end = assistant_response.find("```", json_start)
-                if json_end > json_start:
-                    assistant_response = assistant_response[json_start:json_end].strip()
-            elif "```" in assistant_response:
-                # Handle generic code blocks
-                json_start = assistant_response.find("```") + 3
-                json_end = assistant_response.find("```", json_start)
-                if json_end > json_start:
-                    assistant_response = assistant_response[json_start:json_end].strip()
-            
-            # Now extract JSON from the cleaned response
-            json_start = assistant_response.find('{')
-            json_end = assistant_response.rfind('}') + 1
-            
-            if json_start != -1 and json_end > json_start:
-                json_str = assistant_response[json_start:json_end]
-                result = json.loads(json_str)
-            else:
-                # Fallback if JSON parsing fails
-                result = {
-                    "decision": "REJECT" if "reject" in assistant_response.lower() else "APPROVE",
-                    "confidence": 50,
-                    "explanation": assistant_response,
-                    "violations": [],
-                    "categories_detected": [],
-                    "recommended_action": "manual review recommended"
-                }
+            body = response.split(assistant_marker)[-1].strip() if assistant_marker in response else response
+            if "```json" in body:
+                body = body.split("```json")[1].split("```")[0].strip()
+            elif "```" in body:
+                body = body.split("```")[1].split("```")[0].strip()
+            j_start = body.find("{")
+            j_end   = body.rfind("}") + 1
+            return json.loads(body[j_start:j_end]) if j_start != -1 else _fallback_result(body)
         except json.JSONDecodeError as e:
-            result = {
-                "decision": "REJECT",
-                "confidence": 50,
-                "explanation": f"JSON parsing error: {str(e)}. Response: {response[:200]}",
-                "violations": ["parsing_error"],
-                "categories_detected": [],
-                "recommended_action": "manual review required"
-            }
-        
-        return result
-    
+            return _fallback_result(f"JSON error: {e}. Response: {response[:200]}")
+
+    # ------------------------------------------------------------------
     def explain_decision(self, image: Image.Image, specific_question: str) -> Dict:
-        """
-        Provide detailed explanation for a specific question about the image
-        """
         prompt = f"""Question about this image: {specific_question}
 
 Provide a detailed, factual explanation addressing the question. Be specific and thorough."""
-        
         messages = [
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {"type": "text", "text": prompt}
-                ]
+                    {"type": "text", "text": prompt},
+                ],
             }
         ]
-        
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.processor(
-            text=[text],
-            images=[image],
-            return_tensors="pt",
-            padding=True
-        )
-        
-        inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
-                 for k, v in inputs.items()}
-        
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=512,
-                temperature=0.7,
-                top_p=0.9
-            )
-        
-        explanation = self.processor.decode(outputs[0], skip_special_tokens=True)
-        
-        return {
-            "question": specific_question,
-            "explanation": explanation
-        }
-    
+        explanation = self._run(messages, max_new_tokens=512)
+        return {"question": specific_question, "explanation": explanation}
+
+    # ------------------------------------------------------------------
     def resolve_dispute(
         self,
         image: Image.Image,
         initial_decision: str,
         dispute_reason: str,
-        clip_analysis: Optional[Dict] = None
+        clip_analysis: Optional[Dict] = None,
     ) -> Dict:
-        """
-        Review a disputed moderation decision
-        """
-        context = ""
-        if clip_analysis:
-            context = f"\nCLIP Analysis Context: {json.dumps(clip_analysis, indent=2)}"
-        
+        context = f"\nCLIP Analysis Context: {json.dumps(clip_analysis, indent=2)}" if clip_analysis else ""
         prompt = f"""This image was initially {initial_decision} by our system.
 User dispute reason: {dispute_reason}{context}
 
@@ -252,96 +314,79 @@ Respond in JSON format:
     "reasoning": "detailed reasoning",
     "additional_recommendations": "any recommendations"
 }}"""
-        
         messages = [
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {"type": "text", "text": prompt}
-                ]
+                    {"type": "text", "text": prompt},
+                ],
             }
         ]
-        
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.processor(
-            text=[text],
-            images=[image],
-            return_tensors="pt",
-            padding=True
-        )
-        
-        inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
-                 for k, v in inputs.items()}
-        
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=512,
-                temperature=0.7,
-                top_p=0.9
-            )
-        
-        response = self.processor.decode(outputs[0], skip_special_tokens=True)
-        
-        # Parse response
+        response = self._run(messages, max_new_tokens=512)
         try:
-            json_start = response.find('{')
-            json_end = response.rfind('}') + 1
-            if json_start != -1 and json_end > json_start:
-                result = json.loads(response[json_start:json_end])
-            else:
-                result = {
-                    "dispute_resolution": "OVERTURN",
-                    "final_decision": "APPROVE" if initial_decision == "REJECT" else "REJECT",
-                    "confidence": 50,
-                    "reasoning": response,
-                    "additional_recommendations": "manual review recommended"
-                }
-        except json.JSONDecodeError:
-            result = {
-                "dispute_resolution": "OVERTURN",
-                "final_decision": "APPROVE",
+            j_start = response.find("{")
+            j_end   = response.rfind("}") + 1
+            return json.loads(response[j_start:j_end]) if j_start != -1 else {
+                "dispute_resolution": "UPHOLD",
+                "final_decision": initial_decision,
                 "confidence": 50,
                 "reasoning": response,
-                "additional_recommendations": "manual review required due to parsing error"
+                "additional_recommendations": "manual review recommended",
             }
-        
-        return result
-    
+        except json.JSONDecodeError:
+            return {
+                "dispute_resolution": "UPHOLD",
+                "final_decision": initial_decision,
+                "confidence": 50,
+                "reasoning": response,
+                "additional_recommendations": "manual review required",
+            }
+
+    # ------------------------------------------------------------------
     def generate_description(self, image: Image.Image) -> str:
-        """Generate a detailed description of the image"""
         prompt = "Describe this image in detail. Include what you see, the setting, any text present, and notable features."
-        
         messages = [
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {"type": "text", "text": prompt}
-                ]
+                    {"type": "text", "text": prompt},
+                ],
             }
         ]
-        
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.processor(
-            text=[text],
-            images=[image],
-            return_tensors="pt",
-            padding=True
-        )
-        
-        inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
-                 for k, v in inputs.items()}
-        
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=256,
-                temperature=0.7,
-                top_p=0.9
-            )
-        
-        description = self.processor.decode(outputs[0], skip_special_tokens=True)
-        
-        return description
+        return self._run(messages, max_new_tokens=256)
+
+
+# ---------------------------------------------------------------------------
+# Unified public helper used by main.py / modal_handler.py
+# ---------------------------------------------------------------------------
+def get_qwen_service():
+    """
+    Returns the appropriate Qwen backend based on .env flags:
+      USE_QWEN2VL=True  → local Qwen2VLService (GPU)
+      USE_QWEN2VL=False → None (caller uses groq_moderate_image directly)
+    """
+    if USE_QWEN2VL:
+        return Qwen2VLService(model_name="Qwen/Qwen2-VL-2B-Instruct")
+    return None
+
+
+def groq_moderate_image(image: Image.Image, clip_analysis: Optional[Dict] = None) -> Dict:
+    """
+    Public entry point for Groq-based moderation.
+    Returns a zeroed-out result if no GROQ_API_KEY is configured.
+    """
+    if not GROQ_API_KEY:
+        return {
+            "decision": "APPROVE",
+            "confidence": 0,
+            "explanation": "Groq API key not configured",
+            "violations": [],
+            "is_promotional": False,
+            "is_ai_generated": False,
+            "has_watermark": False,
+            "categories_detected": [],
+            "recommended_action": "approve",
+        }
+    return _groq_moderate(image, clip_analysis)

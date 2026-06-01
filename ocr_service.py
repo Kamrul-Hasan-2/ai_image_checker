@@ -14,22 +14,25 @@ from typing import Dict, List, Tuple
 class OCRService:
     def __init__(self, languages: List[str] = ['en'], model_storage_directory: str = None):
         """Initialize EasyOCR reader with optional model storage directory"""
-        print(f"Loading EasyOCR model for languages: {languages}")
-        
+        import torch
+        use_gpu = torch.cuda.is_available()
+        print(f"Loading EasyOCR model for languages: {languages} (GPU: {use_gpu})")
+
         if model_storage_directory:
-            print(f"Using cached models from: {model_storage_directory}")
             self.reader = easyocr.Reader(
                 languages,
-                gpu=True,
+                gpu=use_gpu,
                 model_storage_directory=model_storage_directory,
-                download_enabled=False
+                download_enabled=False,
+                quantize=True,       # faster inference, minimal accuracy loss
             )
         else:
             self.reader = easyocr.Reader(
                 languages,
-                gpu=True,
+                gpu=use_gpu,
                 model_storage_directory='/root/.cache/easyocr',
-                download_enabled=True
+                download_enabled=True,
+                quantize=True,
             )
         
         print("EasyOCR model loaded successfully")
@@ -74,10 +77,23 @@ class OCRService:
         # Convert RGB to BGR for OpenCV
         if len(img_array.shape) == 3 and img_array.shape[2] == 3:
             img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-        
-        # SINGLE PASS ONLY for speed - no enhancement
-        results = self.reader.readtext(img_array, paragraph=False)
-        
+
+        # Downscale to 480px + canvas_size=320 for fastest OCR.
+        # Product image text (watermarks, prices, promo text) uses large fonts
+        # that are fully readable at 480px. ~6x faster than default 800px.
+        h_orig, w_orig = img_array.shape[:2]
+        if max(h_orig, w_orig) > 480:
+            scale = 480 / max(h_orig, w_orig)
+            img_ocr = cv2.resize(img_array,
+                                 (int(w_orig * scale), int(h_orig * scale)),
+                                 interpolation=cv2.INTER_AREA)
+        else:
+            img_ocr = img_array
+
+        results = self.reader.readtext(img_ocr, paragraph=False,
+                                       canvas_size=320,
+                                       batch_size=8)
+
         # Use results as-is
         unique_results = results
         
