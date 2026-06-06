@@ -3,10 +3,10 @@ Qwen2-VL Service for detailed image moderation.
 
 Two backends controlled by .env flags:
   USE_QWEN2VL=True   → local Qwen2-VL-2B model (GPU required)
-  GROQ_API_KEY=...   → cloud Groq API with qwen/qwen3-32b (text-only, no image)
+  GROQ_API_KEY=...   → cloud Groq API with a vision-capable model (default: llama-4-scout)
 
 When USE_QWEN2VL=False the local model is never loaded.
-Groq is always available as a lightweight text-only path when a key is set.
+Groq is always available as a vision-capable path when a key is set.
 """
 
 import os
@@ -26,11 +26,12 @@ def _env_bool(key: str, default: bool = False) -> bool:
 
 USE_QWEN2VL  = _env_bool("USE_QWEN2VL", False)
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
-GROQ_MODEL   = os.environ.get("GROQ_MODEL", "qwen/qwen3-32b").strip()
+# Default to Llama 4 Scout — vision-capable, fast, free tier on Groq
+GROQ_MODEL   = os.environ.get("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").strip()
 
 
 # ---------------------------------------------------------------------------
-# Groq client (lazy-initialised, text-only)
+# Groq client (lazy-initialised)
 # ---------------------------------------------------------------------------
 _groq_client = None
 
@@ -45,6 +46,10 @@ def _get_groq_client():
     return _groq_client
 
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def _image_to_base64(image: Image.Image) -> str:
     buf = io.BytesIO()
     image.save(buf, format="JPEG", quality=85)
@@ -52,10 +57,10 @@ def _image_to_base64(image: Image.Image) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Groq-based moderation (uses vision via base64 if supported, else text stub)
+# Groq-based moderation (vision via base64 — requires a vision-capable model)
 # ---------------------------------------------------------------------------
 def _groq_moderate(image: Image.Image, clip_analysis: Optional[Dict] = None) -> Dict:
-    """Call Groq qwen3-32b for image moderation (sends image as base64)."""
+    """Call Groq with a vision-capable model (Llama 4 Scout by default) for image moderation."""
     client = _get_groq_client()
 
     context = ""
@@ -74,7 +79,7 @@ Check for:
 3. Illegal content (real weapons, drugs, explicit adult content)
 4. Image quality issues (blurry, screenshot, AI-generated artifacts)
 
-Respond ONLY with valid JSON:
+Respond ONLY with valid JSON (no markdown):
 {{
     "decision": "BLOCK/APPROVE/MANUAL_REVIEW",
     "confidence": 85,
@@ -107,7 +112,6 @@ Respond ONLY with valid JSON:
         )
         raw = response.choices[0].message.content or ""
     except Exception as e:
-        # Groq model may not support vision — fall back to text-only description
         raw = f'{{"decision":"APPROVE","confidence":50,"explanation":"Groq error: {str(e)[:100]}","violations":[],"is_promotional":false,"is_ai_generated":false,"has_watermark":false,"categories_detected":[],"recommended_action":"approve"}}'
 
     # Parse JSON

@@ -104,7 +104,7 @@ class ImageChecker:
                 print("⏭️  Qwen2-VL disabled (USE_QWEN2VL=False)")
 
             if GROQ_API_KEY:
-                print(f"✅ Groq API configured (model: qwen/qwen3-32b)")
+                print(f"✅ Groq API configured (model: {GROQ_MODEL})")
             else:
                 print("⏭️  Groq API not configured (GROQ_API_KEY not set)")
 
