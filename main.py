@@ -52,7 +52,7 @@ except ImportError:
 from quality_service import QualityCheckService
 from ocr_service import OCRService
 from clip_service import CLIPService
-from qwen_service import USE_QWEN2VL, GROQ_API_KEY, get_qwen_service, groq_moderate_image
+from qwen_service import USE_QWEN2VL, GROQ_API_KEY, GROQ_MODEL, get_qwen_service, groq_moderate_image
 from screenshot_detector import compute_screenshot_score, apply_screenshot_decision
 from promotional_detector import detect_promotional_text
 from watermark_detector import detect_watermark_visual
