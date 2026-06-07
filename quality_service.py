@@ -161,6 +161,28 @@ class QualityCheckService:
         img_array = np.array(image.convert('L'))
         h_img, w_img = img_array.shape
 
+        # ── 0. TINY-IMAGE GUARD ──────────────────────────────────────────────
+        # Several downstream operations slice the image into eighths (corner
+        # brightness) and tenths (band scan). When a dimension is < 8 px those
+        # slices become empty, which makes np.mean([]) return NaN (poisoning the
+        # JSON response) and cv2.Laplacian() raise an assertion on an empty array
+        # (crashing the request). An image this small cannot be meaningfully
+        # analysed for blur and is unusable as a product photo regardless, so we
+        # reject it up-front with a stable response shape.
+        if h_img < 8 or w_img < 8:
+            return {
+                "passed": False,
+                "reason": f"Image too small to analyse ({w_img}x{h_img})",
+                "details": {
+                    "blur_confidence": 1.0,
+                    "confidence": 1.0,
+                    "image_too_small": True,
+                    "width": w_img,
+                    "height": h_img,
+                },
+                "confidence": 1.0,
+            }
+
         # ── 1. GLOBAL METRICS ────────────────────────────────────────────────
 
         # Laplacian variance — the primary sharpness signal
@@ -262,7 +284,8 @@ class QualityCheckService:
             img_array[-h_img // 8:, :w_img // 8],
             img_array[-h_img // 8:, -w_img // 8:],
         ]
-        avg_corner_brightness_blur = float(np.mean([c.mean() for c in corners_gray_brightness]))
+        _corner_means_blur = [c.mean() for c in corners_gray_brightness if c.size > 0]
+        avg_corner_brightness_blur = float(np.mean(_corner_means_blur)) if _corner_means_blur else 128.0
         has_bright_background = avg_corner_brightness_blur > 200
 
         # ── 3. PRODUCT LAYOUT DETECTION ──────────────────────────────────────
@@ -293,9 +316,9 @@ class QualityCheckService:
             img_array[-h_img//8:, :w_img//8],
             img_array[-h_img//8:, -w_img//8:],
         ]
-        corner_means = [np.mean(c) for c in corners_gray]
-        avg_corner_brightness = np.mean(corner_means)
-        corner_std = np.std(corner_means)
+        corner_means = [np.mean(c) for c in corners_gray if c.size > 0]
+        avg_corner_brightness = np.mean(corner_means) if corner_means else 0.0
+        corner_std = np.std(corner_means) if len(corner_means) > 1 else 0.0
         pattern_studio_bg = avg_corner_brightness > 170 and corner_std < 35
 
         is_product_photo_layout = pattern_centered or pattern_filled_frame or pattern_studio_bg
@@ -366,6 +389,10 @@ class QualityCheckService:
             r0 = i * BAND
             r1 = min((i + 1) * BAND, h_img)
             band = img_array[r0:r1, :]
+            if band.size == 0:        # past the bottom edge — no rows left
+                band_laps.append(0.0)
+                band_edges.append(0.0)
+                continue
             bl = float(cv2.Laplacian(band, cv2.CV_64F).var())
             be_arr = cv2.Canny(band, 30, 100)
             be = float(np.sum(be_arr > 0) / (be_arr.size + 1e-10))
@@ -902,7 +929,18 @@ class QualityCheckService:
         """Check if image is a MOBILE PHONE screenshot by detecting status bar + navbar UI elements"""
         img_array = np.array(image)
         height, width = img_array.shape[:2]
-        
+
+        # Tiny-image guard: the corner/region slicing below uses 10% of the
+        # smaller dimension; for images < 10 px that slice is empty and NaN
+        # poisons the response. Such an image cannot be a phone screenshot.
+        if height < 10 or width < 10:
+            return {
+                "passed": True,
+                "reason": f"Image too small to be a screenshot ({width}x{height})",
+                "details": {"is_product_photo": False, "image_too_small": True},
+                "confidence": 0.0,
+            }
+
         # Convert to grayscale
         if len(img_array.shape) == 3:
             gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
@@ -922,9 +960,9 @@ class QualityCheckService:
             gray[-corner_size:, 0:corner_size],  # Bottom-left
             gray[-corner_size:, -corner_size:]   # Bottom-right
         ]
-        corner_means = [np.mean(c) for c in corners]
-        corner_std = np.std(corner_means)
-        avg_corner_brightness = np.mean(corner_means)
+        corner_means = [np.mean(c) for c in corners if c.size > 0]
+        corner_std = np.std(corner_means) if len(corner_means) > 1 else 0.0
+        avg_corner_brightness = np.mean(corner_means) if corner_means else 0.0
         
         # Check for centered product (common in product photography)
         center_region = gray[height//4:3*height//4, width//4:3*width//4]

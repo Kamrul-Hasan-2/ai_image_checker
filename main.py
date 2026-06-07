@@ -17,6 +17,7 @@ import requests
 from PIL import Image
 import traceback
 import asyncio
+from image_loader import load_image_safe
 from concurrent.futures import ThreadPoolExecutor
 
 # Thread pool for running blocking CPU/IO work concurrently
@@ -114,26 +115,8 @@ class ImageChecker:
             raise
     
     def load_image(self, image_input: str) -> Image.Image:
-        """Load image from URL or base64"""
-        try:
-            if image_input.startswith('http://') or image_input.startswith('https://'):
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                }
-                response = requests.get(image_input, headers=headers, timeout=10)
-                response.raise_for_status()
-                image = Image.open(io.BytesIO(response.content))
-            elif image_input.startswith('data:image'):
-                base64_str = image_input.split(',')[1]
-                image_data = base64.b64decode(base64_str)
-                image = Image.open(io.BytesIO(image_data))
-            else:
-                image_data = base64.b64decode(image_input)
-                image = Image.open(io.BytesIO(image_data))
-            
-            return image.convert('RGB')
-        except Exception as e:
-            raise ValueError(f"Failed to load image: {str(e)}")
+        """Load image from URL or base64 (SSRF-guarded, size-capped, data-URL safe)."""
+        return load_image_safe(image_input)
     
     async def process_single_image(self, image_input: str, category: str, pipeline_mode: str, title: str = None, description: str = None, image_id: int = None, position_id: int = None) -> Dict[str, Any]:
         """

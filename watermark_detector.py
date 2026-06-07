@@ -117,8 +117,16 @@ def _detect_transparent_overlay(bgr: np.ndarray) -> Dict[str, Any]:
     sq_mean  = cv2.blur(gray, (win, win)) ** 2
     variance = np.maximum(mean_sq - sq_mean, 0)
 
-    # Pixels where local variance is very low relative to image median
-    med_var = float(np.median(variance[variance > 1]))  # skip near-zero pixels
+    # Pixels where local variance is very low relative to image median.
+    # Guard the empty-slice case: on a uniform / heavily-compressed / product-on-
+    # white image every local variance can be <= 1, making variance[variance > 1]
+    # empty. np.median([]) returns NaN, and `variance < NaN` is all-False, which
+    # would silently disable detection. Fall back to the overall mean variance.
+    _nonzero_var = variance[variance > 1]
+    if _nonzero_var.size > 0:
+        med_var = float(np.median(_nonzero_var))
+    else:
+        med_var = float(np.mean(variance))  # ~0 for a truly uniform image
     low_var_mask = (variance < med_var * 0.25).astype(np.uint8) * 255
 
     # Remove the image border itself (which is naturally low-variance)
