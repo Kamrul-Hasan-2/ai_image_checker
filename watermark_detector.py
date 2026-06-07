@@ -191,6 +191,15 @@ def _detect_transparent_overlay(bgr: np.ndarray) -> Dict[str, Any]:
         if fill_ratio > 0.65 and (bw * bh) / (w * h) > 0.015:
             continue
 
+        # Skip: blob is significantly darker than the image mean AND has high internal
+        # variance — this is a dark product object sitting on a bright/white background,
+        # NOT a semi-transparent overlay. Overlays are pulled toward the overlay colour
+        # (light or brand-tinted), so they are rarely >60 grey levels below img_mean.
+        # High std (>50) further confirms it is a textured object, not a flat overlay patch.
+        blob_std = float(gray[y: y+bh, x: x+bw].std())
+        if blob_mean < img_mean - 60 and blob_std > 50:
+            continue
+
         overlay_blobs.append({"area": area, "rect": (x, y, bw, bh), "mean": round(blob_mean, 1)})
 
     has_overlay = len(overlay_blobs) > 0
@@ -265,7 +274,11 @@ def _detect_diagonal_text(bgr: np.ndarray) -> Dict[str, Any]:
             # text is a floating overlay, not a label printed on the full product face.
             blob_w_frac = bw / w
             blob_h_frac = bh / h
-            is_product_label = (blob_w_frac > 0.50 or blob_h_frac > 0.50)
+            # Reject if blob covers too much of the image in either dimension:
+            # watermark text is a floating overlay, not 40%+ of the image height.
+            # Also reject if the blob is too tall relative to its width — that is a
+            # product silhouette (horn, speaker) not diagonal text.
+            is_product_label = (blob_w_frac > 0.40 or blob_h_frac > 0.40)
             if aspect > 2.5 and not is_product_label:
                 diagonal_blobs.append({
                     "area":   float(area),
@@ -335,6 +348,15 @@ def _detect_bottom_strip(bgr: np.ndarray) -> Dict[str, Any]:
     bot_edge_density = float(edges[h - bottom_h:, :].mean())
     top_edge_density = float(edges[:top_h, :].mean())
 
+    # Whole-image white-background check: product-on-white-bg photos (catalogue shots,
+    # e-commerce listings) have a bright median and most pixels near-white. In these images
+    # the top/bottom margins are just more of the same white background — NOT an attribution
+    # strip. The strip detector fires when those margins are brighter than the product-cluttered
+    # middle, which is always true when dark products pull down the middle mean.
+    img_median = float(np.median(gray))
+    white_bg_frac = float((gray > 220).mean())
+    is_white_bg_photo = img_median > 230 and white_bg_frac > 0.50
+
     def _strip_score(strip_mean, strip_std, strip_edge_density, ref_mean, ref_std) -> float:
         brightness_diff = abs(strip_mean - ref_mean)
         # Attribution strips (Watermarkly, photo credits) have a very specific profile:
@@ -347,8 +369,11 @@ def _detect_bottom_strip(bgr: np.ndarray) -> Dict[str, Any]:
         #      Raised from 2.0: a plain white wall/floor boundary produces ~1-3 from
         #      the product edge at the strip boundary; real attribution text is denser.
         #   5. Clearly brighter than the product body
-        #   6. The strip must NOT span nearly the full image width of near-white pixels
-        #      (a white wall / floor background is a scene element, not a banner)
+        #   6. Guard: in a product-on-white-background photo the top/bottom margins
+        #      are naturally brighter than the darker product area — that brightness
+        #      difference is NOT a watermark banner, it's just the scene background.
+        if is_white_bg_photo:
+            return 0.0
         is_light_bg     = strip_mean > 175
         is_very_uniform = strip_std  < 62                  # absolute cap: product margins can hit 60-100
         is_more_uniform = strip_std  < ref_std * 0.75      # also calmer than product area
