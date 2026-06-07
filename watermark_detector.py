@@ -411,6 +411,7 @@ def _detect_corner_logo(bgr: np.ndarray) -> Dict[str, Any]:
     cy1, cy2 = int(h * 0.25), int(h * 0.75)
     centre_mean = float(gray[cy1:cy2, cx1:cx2].mean())
     centre_std  = float(gray[cy1:cy2, cx1:cx2].std())
+    img_median  = float(np.median(gray))  # overall image brightness baseline
 
     logo_zones: List[str] = []
     zone_scores: Dict[str, float] = {}
@@ -439,7 +440,27 @@ def _detect_corner_logo(bgr: np.ndarray) -> Dict[str, Any]:
         #    products on white surfaces are not logo patches)
         is_not_plain_bg = zone_mean < 230.0
 
-        if is_uniform and has_content and is_different and is_not_plain_bg:
+        # 5. Guard: a small product label sticker physically printed on the product
+        #    body is NOT a watermark. A digital logo overlay sits on a distinctly
+        #    lighter/separate background region that spans the full corner zone.
+        #    Product labels embedded on a dark product cause the zone to be a MIX
+        #    of dark product + small bright label → moderate zone_mean.
+        #    Real corner watermark patches have a near-uniform light background
+        #    (zone_std < 25) AND the zone mean is clearly above the image median
+        #    (brighter than the product body by > 50 grey levels).
+        #    If zone_std is moderate (25–45) the bright patch is a product surface
+        #    feature (label, sticker, panel), not an overlay — skip it.
+        is_distinct_overlay = (
+            zone_std < 25.0                        # very uniform bg = solid overlay patch
+            and zone_mean > img_median + 50        # clearly brighter than the product body
+        )
+
+        # Only flag as corner logo if it looks like a distinct overlay,
+        # OR the edge density is very high (dense logo art, not a barcode sticker)
+        # and the zone genuinely differs from the image as a whole.
+        has_overlay_profile = is_distinct_overlay or (edge_density > 18.0 and zone_mean > img_median + 60)
+
+        if is_uniform and has_content and is_different and is_not_plain_bg and has_overlay_profile:
             logo_zones.append(name)
             # Score: edge density (more logo pixels = higher confidence) scaled 0-1
             zone_scores[name] = min(edge_density / 25.0, 1.0)

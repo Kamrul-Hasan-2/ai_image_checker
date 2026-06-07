@@ -381,27 +381,75 @@ class QualityCheckService:
                 peak_idx = i
 
         top_half_lap = peak_lap  # product sharpness reference
+        peak_edge = band_edges[peak_idx] if peak_idx >= 0 else 0.0
 
         if peak_idx >= 0 and peak_lap > 150:
             # Look at bands BELOW the product peak for a soft reflection band
             # A reflection band: has some edges (> 0.005) but much lower lap
             best_reflect_lap = None
             best_reflect_edge = 0.0
+            best_reflect_idx  = -1
+            # Track the MOST STRUCTURED qualifying band below the peak (highest
+            # edge density). A genuine reflection leaves a mirrored edge
+            # signature in at least one band; if ANY qualifying band carries
+            # structured edges, this is a reflection, not pure defocus — even if
+            # the highest-Laplacian band happens to be a sparser sibling.
+            max_struct_edge_below = 0.0
             for i in range(peak_idx + 1, 10):
                 bl = band_laps[i]
                 be = band_edges[i]
                 if be > 0.005:   # has visible content — not blank background
                     ratio_i = bl / (peak_lap + 1e-10)
                     if ratio_i < 0.40:   # significantly softer than product
+                        if be > max_struct_edge_below:
+                            max_struct_edge_below = be
                         if best_reflect_lap is None or bl > best_reflect_lap:
                             best_reflect_lap  = bl
                             best_reflect_edge = be
+                            best_reflect_idx  = i
 
             if best_reflect_lap is not None:
                 bottom_strip_lap    = best_reflect_lap
                 bottom_edge_density = best_reflect_edge
                 bottom_strip_ratio  = bottom_strip_lap / (peak_lap + 1e-10)
                 has_bottom_strip_blur = True
+
+                # ── Natural depth-of-field guard ─────────────────────────────
+                # Distinguish a GLOSSY REFLECTION defect from a naturally soft
+                # out-of-focus BACKGROUND (wall/floor) behind a sharp product.
+                #
+                # A genuine reflection is a MIRRORED COPY of the product: it
+                # retains structure, so its band carries edge content that is a
+                # meaningful fraction of the product band's edges (be is a
+                # sizeable fraction of peak_edge), even when very soft.
+                #
+                # A natural-DoF background instead shows PURE DEFOCUS: its
+                # Laplacian ratio collapses toward zero (< 0.10) AND it carries
+                # only sparse texture relative to the sharp product
+                # (be < 0.5 * peak_edge). When BOTH hold, this is depth-of-field,
+                # not a reflection — so don't flag it.
+                #
+                # NOTE: we require BOTH the collapsed ratio AND the sparse-edge
+                # condition. A genuine reflection that is merely soft (low ratio)
+                # but still STRUCTURED (its mirror edges show up in SOME band as
+                # >= 0.5*peak_edge) is preserved, as is a reflection separated
+                # from the product by a contact-shadow band — the edge-content
+                # test across ALL qualifying bands, not band distance, is what
+                # decides. This keeps section 3c's real purpose intact while
+                # removing the soft-floor false positive.
+                #
+                # We test max_struct_edge_below (the most structured band below
+                # the peak), not just the highest-Laplacian band, so a sparse
+                # sibling band cannot mask a structured mirror reflection.
+                is_natural_dof = (
+                    bottom_strip_ratio < 0.10
+                    and max_struct_edge_below < (peak_edge * 0.5)
+                )
+                if is_natural_dof:
+                    has_bottom_strip_blur = False
+                    bottom_strip_ratio    = 1.0
+                    bottom_strip_lap      = 0.0
+                    bottom_edge_density   = 0.0
 
         # ── 4. DETAIL-LOSS (only meaningful when the image has texture) ───────
         blur_3x3 = cv2.GaussianBlur(img_array, (3, 3), 0)
@@ -461,6 +509,45 @@ class QualityCheckService:
         contrast = np.std(img_array)
         dynamic_range = int(np.max(img_array)) - int(np.min(img_array))
 
+        # ── 7b. SHARP-SUBJECT DETECTION (real-life / lifestyle photo guard) ───
+        # A lifestyle product photo (e.g. a black charger on a cardboard box with
+        # a plant and a softly-out-of-focus wall/floor behind it) has a genuinely
+        # SHARP in-focus subject but a naturally SOFT background from depth of
+        # field. Several blur heuristics below (patch-blur grid, bottom-strip
+        # "reflection") misread that soft background as a defect.
+        #
+        # We detect a sharp subject by combining the cleanest focus signals:
+        #   • center_lap_var — the product usually lives in the centre and a
+        #     sharp subject pushes this high (sharp ≈ 250+, blurry ≈ <160)
+        #   • tenengrad_score — global gradient energy; sharp edges (box text,
+        #     charger rim, cable) keep this high even when the product is dark
+        #   • a sufficiently sharp grid cell exists somewhere (max cell variance)
+        # When a sharp subject is clearly present we treat the soft regions as
+        # background bokeh, NOT blur, and suppress the background-driven votes.
+        #
+        # This does NOT affect genuinely blurry photos: when the whole image is
+        # soft, center_lap_var and tenengrad are both low, so has_sharp_subject
+        # is False and every vote stays active.
+        _max_cell_var_seen = 0.0
+        try:
+            _gc_h = max(1, h_img // 6); _gc_w = max(1, w_img // 6)
+            for _gr in range(6):
+                for _gcl in range(6):
+                    _r0, _r1 = _gr * _gc_h, min((_gr + 1) * _gc_h, h_img)
+                    _c0, _c1 = _gcl * _gc_w, min((_gcl + 1) * _gc_w, w_img)
+                    _cell = img_array[_r0:_r1, _c0:_c1]
+                    if _cell.size > 0:
+                        _v = float(cv2.Laplacian(_cell, cv2.CV_64F).var())
+                        if _v > _max_cell_var_seen:
+                            _max_cell_var_seen = _v
+        except Exception:
+            _max_cell_var_seen = center_lap_var
+
+        has_sharp_subject = (
+            (center_lap_var > 250 and tenengrad_score > 2500)
+            or (center_lap_var > 200 and _max_cell_var_seen > 600 and tenengrad_score > 3000)
+        )
+
         # ── 8. SOFT CONFIDENCE VOTING ─────────────────────────────────────────
         # Each metric casts a weighted blur-confidence vote in [0, 1].
         # No single vote causes rejection. Weights sum to 1.0.
@@ -513,7 +600,14 @@ class QualityCheckService:
         # (g) Patch / selective blur — face anonymisation, censored regions.
         # Strong signal: counts as a hard boost when ≥25% of cells are blurry.
         # Weight is 0.30 so even a modest fraction pushes confidence above threshold.
-        if has_patch_blur:
+        #
+        # Guard: when a SHARP SUBJECT is present (lifestyle photo with a sharp
+        # product and a soft-DoF background), the "blurry" grid cells are just the
+        # out-of-focus background — not a selective-blur overlay. Real patch blur
+        # (face anonymisation) blurs the SUBJECT, so the centre is soft and
+        # has_sharp_subject is False. Only suppress when the patch fraction is
+        # modest (< 0.45); a large blurred fraction is suspicious regardless.
+        if has_patch_blur and not (has_sharp_subject and patch_blur_fraction < 0.45):
             votes.append(min(patch_blur_fraction * 1.20, 1.0) * 0.30)
         else:
             votes.append(0.0)
@@ -522,6 +616,14 @@ class QualityCheckService:
         # Weight 0.65: this is a direct spatial measurement with very high
         # signal confidence. A ratio of 0.03 (reflection is 3% as sharp as the
         # product) is unambiguous and must trigger detection on its own.
+        #
+        # The natural-depth-of-field false positive (a soft wall/floor behind a
+        # sharp product being misread as a glossy reflection) is now filtered at
+        # the source in section 3c via the is_natural_dof guard, which clears
+        # has_bottom_strip_blur for pure-defocus background bands while keeping
+        # genuine reflections (which retain mirrored edge structure) flagged.
+        # So this vote keeps its full weight on ALL surface types — including
+        # dark glossy reflections — without re-introducing the floor false fire.
         if has_bottom_strip_blur:
             strip_conf = max(0.0, 1.0 - bottom_strip_ratio / 0.40)  # 0→1 as ratio→0
             votes.append(strip_conf * 0.65)
@@ -569,10 +671,32 @@ class QualityCheckService:
             and tenengrad_score < 500
         ) or (
             # Soft image with sparse edges: global laplacian is low AND edge density
-            # is sparse. High tenengrad from compression noise or product-boundary edges
-            # can mask this — the laplacian + edge combo is more reliable.
-            # Sharp product images always have edge_density > 0.05 and lap_var > 150.
+            # is sparse.
+            #
+            # IMPORTANT: this clause must NOT fire on sharp real-life lifestyle
+            # photos. A dark product (e.g. a black charger) on a soft, naturally
+            # out-of-focus real-world background (wall, floor, plant) legitimately
+            # has a LOW global laplacian_var and LOW edge_density — the dark
+            # product contributes little Laplacian energy and the soft background
+            # has few crisp edges. Such photos are still SHARP where it matters:
+            # the product/box-text region has high center_lap_var and the overall
+            # tenengrad gradient energy is high.
+            #
+            # The old condition (laplacian_var < 100 and edge_density < 0.04)
+            # wrongly rejected these. Empirically, a sharp lifestyle photo and a
+            # genuinely out-of-focus one can have nearly IDENTICAL global
+            # laplacian_var, edge_density and tenengrad — the only clean
+            # discriminator is whether a sharp SUBJECT exists (high center-crop
+            # Laplacian). So we gate this clause on `not has_sharp_subject`:
+            #   • global laplacian low  AND  edge density sparse
+            #   • AND there is NO sharp in-focus subject anywhere
+            #     (has_sharp_subject is driven by center_lap_var + tenengrad +
+            #      max grid-cell variance — see section 7b)
+            # A genuinely blurry image has no sharp subject → rejected here.
+            # A sharp dark product on a soft background HAS a sharp subject
+            # (sharp box text / charger edges) → spared.
             laplacian_var < 100 and edge_density < 0.04
+            and not has_sharp_subject
         )
         if absolute_reject:
             blur_confidence = 1.0
