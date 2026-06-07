@@ -548,6 +548,47 @@ class QualityCheckService:
             or (center_lap_var > 200 and _max_cell_var_seen > 600 and tenengrad_score > 3000)
         )
 
+        # ── 7c. GLOSSY-SHARP PRODUCT DETECTION (smooth white/silver product) ──
+        # A smooth glossy product (white projector, polished lens, metal knob) on
+        # a white studio background is TACK SHARP at its edges/rims but has almost
+        # no INTERIOR surface texture. For bright backgrounds the laplacian vote (a)
+        # uses surface_lap_var (interior pixels only), which collapses to ~1-5 for
+        # such products — so a perfectly sharp glossy product reads as "blurry".
+        #
+        # We recognise this case by requiring the product to be unambiguously sharp
+        # on EDGE-based signals that COLLAPSE under real blur:
+        #   • center_lap_var   — center crop genuinely sharp (blurry < 150)
+        #   • top_half_lap     — the sharpest 10%-band is sharp (blurry peak < 200)
+        #   • edge_strength_ratio — crisp edges survive the strong-Canny pass
+        # AND the interior is intrinsically smooth (surface_lap_var very low) — i.e.
+        # the low surface texture is "smooth by design", not caused by blur.
+        #
+        # Thresholds are deliberately HIGH (350 / 400) so that JPEG ringing or an
+        # outline of a genuinely-blurry white product (which can nudge these to
+        # ~300-330) cannot satisfy them. The sharp projector measures 437 / 524.
+        has_glossy_sharp_product = (
+            center_lap_var > 350
+            and top_half_lap > 400
+            and edge_strength_ratio > 0.18
+            and surface_lap_var < 25            # interior genuinely smooth-by-design
+        )
+
+        # ── 7d. SHARP-PRODUCT EDGE-LAP FALLBACK ELIGIBILITY ──────────────────
+        # When can the bright-background laplacian vote trust EDGE sharpness
+        # (center_lap_var / top_half_lap) instead of interior surface texture?
+        # Only when a sharp subject is present AND there is NO competing defect
+        # that the surface-texture penalty is needed to help reject:
+        #   • has_bottom_strip_blur — a glossy product WITH a mirror-reflection
+        #     defect must keep its surface_lap_var penalty so it stacks with the
+        #     reflection vote (otherwise zeroing the lap vote lets the reflection
+        #     squeak under threshold — adversarially-verified regression).
+        #   • has_patch_blur — selective/partial blur must not be masked.
+        use_edge_lap_for_bright_bg = (
+            (has_sharp_subject or has_glossy_sharp_product)
+            and not has_bottom_strip_blur
+            and not has_patch_blur
+        )
+
         # ── 8. SOFT CONFIDENCE VOTING ─────────────────────────────────────────
         # Each metric casts a weighted blur-confidence vote in [0, 1].
         # No single vote causes rejection. Weights sum to 1.0.
@@ -561,10 +602,20 @@ class QualityCheckService:
         #   • otherwise: use the better of global and center-crop
         if has_bright_background:
             # For studio shots use surface_lap_var (interior pixels, no rims) as
-            # the primary signal. If the interior mask was too small to be reliable
-            # (surface_lap_var == roi_lap_var fallback), use roi_lap_var instead.
-            # Never use center_lap_var here — jar rims in the center crop inflate it.
-            best_lap = surface_lap_var
+            # the primary signal: this detects a SOFT product surface even when a
+            # sharp steel rim would otherwise inflate the global/center Laplacian.
+            #
+            # EXCEPTION — smooth glossy SHARP products (white projector, polished
+            # lens): their interior is textureless by design, so surface_lap_var
+            # collapses to ~1-5 even though the product is tack sharp. When a sharp
+            # subject is present and there is no reflection/patch defect that needs
+            # the surface penalty (see use_edge_lap_for_bright_bg, section 7d), fall
+            # back to the EDGE-based sharpness (center_lap_var, top_half_lap), which
+            # stays high for sharp products and collapses under real blur.
+            if use_edge_lap_for_bright_bg:
+                best_lap = max(surface_lap_var, center_lap_var, top_half_lap)
+            else:
+                best_lap = surface_lap_var
         else:
             best_lap = max(laplacian_var, center_lap_var, roi_lap_var)
         lap_conf = max(0.0, 1.0 - best_lap / 500.0)   # saturates at 0 for lap >= 500 (was 800)
@@ -747,6 +798,8 @@ class QualityCheckService:
             "surface_lap_var": round(surface_lap_var, 2),
             "has_bright_background": has_bright_background,
             "best_lap_used": round(best_lap, 2),
+            "has_glossy_sharp_product": has_glossy_sharp_product,
+            "use_edge_lap_for_bright_bg": use_edge_lap_for_bright_bg,
             "has_patch_blur": has_patch_blur,
             "patch_blur_fraction": round(patch_blur_fraction, 3),
             "has_bottom_strip_blur": has_bottom_strip_blur,
