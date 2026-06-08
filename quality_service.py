@@ -569,6 +569,13 @@ class QualityCheckService:
             _gc_h = max(1, h_img // 6); _gc_w = max(1, w_img // 6)
             for _gr in range(6):
                 for _gcl in range(6):
+                    # Skip the outer ring of cells. Watermarks and logos placed
+                    # at image corners create locally very high cell variance that
+                    # would falsely trigger has_sharp_subject for a blurry image.
+                    # Only interior cells (rows / cols 1–4 in a 6×6 grid) are
+                    # used — the sharpest product detail always lives there.
+                    if _gr == 0 or _gr == 5 or _gcl == 0 or _gcl == 5:
+                        continue
                     _r0, _r1 = _gr * _gc_h, min((_gr + 1) * _gc_h, h_img)
                     _c0, _c1 = _gcl * _gc_w, min((_gcl + 1) * _gc_w, w_img)
                     _cell = img_array[_r0:_r1, _c0:_c1]
@@ -836,6 +843,20 @@ class QualityCheckService:
             and center_lap_var < 200
             and laplacian_var > center_lap_var * 2.5
             and surface_lap_var < 15
+            and not has_sharp_subject
+        ) or (
+            # Globally soft image that has edges but lacks crispness.
+            # A blurry keyboard, text-heavy packaging, or soft-focus product
+            # photo has edges detectable by low-threshold Canny
+            # (image_has_texture=True) but loses very little additional detail
+            # when further blurred (detail_loss_3x3 < 0.8 — already soft).
+            # A SHARP textured image has significantly higher detail_loss because
+            # crisp edges carry large high-frequency energy that a 3×3 smoothing
+            # removes. Guard: not has_sharp_subject prevents this from firing
+            # when the image centre genuinely contains a tack-sharp product.
+            image_has_texture
+            and detail_loss_3x3 < 0.8
+            and center_lap_var < 400
             and not has_sharp_subject
         )
         if absolute_reject:
