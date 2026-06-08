@@ -12,7 +12,7 @@ from typing import Dict, Tuple
 class QualityCheckService:
     def __init__(self):
         """Initialize quality check thresholds"""
-        self.min_resolution = 100  # minimum width/height (allows 400x400 and up)
+        self.min_resolution = 1024  # minimum width/height — images below 1024px are too low-res
         self.max_resolution = 10000  # maximum width/height
         self.min_aspect_ratio = 0.2  # 1:5
         self.max_aspect_ratio = 5.0  # 5:1
@@ -109,7 +109,7 @@ class QualityCheckService:
         if width < self.min_resolution or height < self.min_resolution:
             return {
                 "passed": False,
-                "reason": f"Resolution too low: {width}x{height}",
+                "reason": f"Resolution too low: {width}x{height} (minimum {self.min_resolution}px required on each side)",
                 "details": {"width": width, "height": height}
             }
         

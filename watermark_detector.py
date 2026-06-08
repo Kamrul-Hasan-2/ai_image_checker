@@ -219,6 +219,27 @@ def _detect_transparent_overlay(bgr: np.ndarray) -> Dict[str, Any]:
         if blob_mean < img_mean - 60 and blob_std > 50:
             continue
 
+        # Skip: physical product sticker / label.
+        # Certification stickers (Intel, CE, FCC, brand badges) on electronic products are
+        # small solid-coloured rectangles permanently attached to the product surface.
+        # They share three properties that distinguish them from digital overlays:
+        #   fill_ratio > 0.75 — near-rectangular contour (solid fill, not text outline)
+        #   blob_area_frac < 0.025 — small (< 2.5 % of image)
+        #   blob_std < 35 — interior is one uniform colour; real semi-transparent overlays
+        #                    blend with the product pixels beneath, raising std to > 40.
+        if fill_ratio > 0.75 and blob_area_frac < 0.025 and blob_std < 35:
+            continue
+
+        # Skip: near-white label positioned in the image interior (not near image edge).
+        # The existing `is_near_white and is_edge_blob` guard already removes bright
+        # background margins. This clause handles white product labels (barcode stickers,
+        # compliance certificates) that sit in the centre of the product/frame.
+        if is_near_white and blob_area_frac < 0.04:
+            is_centre_blob = not (x < w * 0.15 or (x + bw) > w * 0.85 or
+                                  y < h * 0.15 or (y + bh) > h * 0.85)
+            if is_centre_blob:
+                continue
+
         overlay_blobs.append({"area": area, "rect": (x, y, bw, bh), "mean": round(blob_mean, 1)})
 
     has_overlay = len(overlay_blobs) > 0
