@@ -471,6 +471,15 @@ class QualityCheckService:
                 is_natural_dof = (
                     bottom_strip_ratio < 0.10
                     and max_struct_edge_below < (peak_edge * 0.5)
+                ) or (
+                    # A soft band below a MODERATELY sharp product (peak_lap < 500)
+                    # is depth-of-field bokeh (wall, floor), not a mirror reflection.
+                    # Genuine reflection defects sit beneath VERY sharp products
+                    # (peak_lap >> 500) whose crisp edges survive into the reflected copy.
+                    # When the product itself is not exceptionally sharp, the strip
+                    # signal would fire on any natural-scene soft background, creating
+                    # false positives for lifestyle/real-world product photos.
+                    peak_lap < 500 and bottom_strip_ratio < 0.35
                 )
                 if is_natural_dof:
                     has_bottom_strip_blur = False
@@ -729,8 +738,8 @@ class QualityCheckService:
             REJECT_THRESHOLD     = 0.55
             BORDERLINE_THRESHOLD = 0.42
         else:
-            REJECT_THRESHOLD     = 0.65
-            BORDERLINE_THRESHOLD = 0.50
+            REJECT_THRESHOLD     = 0.58   # was 0.65 — votes (a-f) for moderate blur sum to ~0.55-0.63
+            BORDERLINE_THRESHOLD = 0.42
 
         is_blurry     = blur_confidence >= REJECT_THRESHOLD
         is_borderline = BORDERLINE_THRESHOLD <= blur_confidence < REJECT_THRESHOLD
@@ -774,6 +783,15 @@ class QualityCheckService:
             # A sharp dark product on a soft background HAS a sharp subject
             # (sharp box text / charger edges) → spared.
             laplacian_var < 100 and edge_density < 0.04
+            and not has_sharp_subject
+        ) or (
+            # Moderate blur that slips below the soft-vote threshold:
+            # centre AND global Laplacian are both low AND tenengrad gradient
+            # energy is weak AND no sharp in-focus subject exists.
+            # A sharp dark product on a soft background has centre_lap_var > 150
+            # and/or tenengrad > 600, so it is not caught here.
+            center_lap_var < 120 and laplacian_var < 120
+            and tenengrad_score < 600
             and not has_sharp_subject
         )
         if absolute_reject:

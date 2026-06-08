@@ -110,6 +110,7 @@ def _detect_transparent_overlay(bgr: np.ndarray) -> Dict[str, Any]:
     """
     h, w = bgr.shape[:2]
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    hsv  = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
 
     # Local variance via box filter trick: E[X²] - (E[X])²
     win = 24
@@ -198,6 +199,16 @@ def _detect_transparent_overlay(bgr: np.ndarray) -> Dict[str, Any]:
         fill_ratio = area / max(bw * bh, 1)
         if fill_ratio > 0.65 and (bw * bh) / (w * h) > 0.015:
             continue
+
+        # Skip: large blob with high color saturation = colored studio backdrop section
+        # (geometric/colored background panels such as the tri-color studio setups common
+        # in product photography). Semi-transparent watermark overlays are low-to-medium
+        # saturation; solid primary-color background panels have high HSV-S (> 70).
+        # Only applied to blobs > 10 % of image so small brand-colored logo overlays are
+        # still caught.
+        if blob_area_frac > 0.10:
+            if float(hsv[y: y+bh, x: x+bw, 1].mean()) > 70:
+                continue
 
         # Skip: blob is significantly darker than the image mean AND has high internal
         # variance — this is a dark product object sitting on a bright/white background,
@@ -288,6 +299,20 @@ def _detect_diagonal_text(bgr: np.ndarray) -> Dict[str, Any]:
             # product silhouette (horn, speaker) not diagonal text.
             is_product_label = (blob_w_frac > 0.40 or blob_h_frac > 0.40)
             if aspect > 2.5 and not is_product_label:
+                # Skip: blob region is medium-brightness and low-saturation.
+                # Retail-box line-art illustrations are printed on cardboard
+                # (HSV value ~130-185, saturation ~10-45).  Digital watermark text
+                # overlays appear over the main product area which is either bright
+                # (white bg, light product) or distinctly saturated (coloured product).
+                x_bb, y_bb, bw_bb, bh_bb = cv2.boundingRect(c)
+                roi_bgr = bgr[y_bb: y_bb + bh_bb, x_bb: x_bb + bw_bb]
+                if roi_bgr.size > 0:
+                    roi_hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+                    roi_val = float(roi_hsv[:, :, 2].mean())
+                    roi_sat = float(roi_hsv[:, :, 1].mean())
+                    if 120 < roi_val < 190 and roi_sat < 50:
+                        continue
+
                 diagonal_blobs.append({
                     "area":   float(area),
                     "angle":  round(float(angle), 1),
@@ -694,7 +719,14 @@ def detect_watermark_visual(
     # transparent_overlay: semi-transparent alpha-blend patch — very specific.
     # diagonal_glare: large diagonal bright overlay crossing product area —
     #   unambiguous when it covers 15%+ of the image at a diagonal angle.
-    if scores["transparent_overlay"] >= 0.70:
+    #
+    # For high-confidence product photos (CLIP confidence > 0.60) we raise the bar
+    # to 0.85 to avoid false positives from colored studio backdrops or product
+    # surface highlights that can score up to ~0.67 on Signal A.
+    overlay_tier1_thresh = (
+        0.85 if (is_product_photo and product_photo_confidence > 0.60) else 0.70
+    )
+    if scores["transparent_overlay"] >= overlay_tier1_thresh:
         weighted_score = scores["transparent_overlay"]
         is_watermark   = True
         decision_reason = "transparent_overlay_strong"
