@@ -817,6 +817,26 @@ class QualityCheckService:
             and not has_glossy_sharp_product
             and is_product_photo_layout
             and product_pixel_count > (h_img * w_img * 0.10)
+        ) or (
+            # Outdoor / lifestyle photo where a textured background (grass, carpet,
+            # wood grain) inflates the global Laplacian far above the product-center
+            # sharpness, masking a soft product.
+            #
+            # Signature:
+            #   • laplacian_var >> center_lap_var — background drives global metrics
+            #   • center_lap_var < 200 — product centre is genuinely soft
+            #   • surface_lap_var < 15 — product surface interior is very soft
+            #   • not has_sharp_subject — no sharp in-focus product detected
+            #
+            # Guard: has_bright_background=True images are handled by the clause
+            # above. has_sharp_subject=True means the product itself (not the
+            # background) is the reason for high sharpness — never fire in that case
+            # (catches the sharp charger on cardboard + plant REALISTIC test case).
+            not has_bright_background
+            and center_lap_var < 200
+            and laplacian_var > center_lap_var * 2.5
+            and surface_lap_var < 15
+            and not has_sharp_subject
         )
         if absolute_reject:
             blur_confidence = 1.0
