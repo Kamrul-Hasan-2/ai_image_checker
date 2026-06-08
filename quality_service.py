@@ -623,6 +623,14 @@ class QualityCheckService:
             (has_sharp_subject or has_glossy_sharp_product)
             and not has_bottom_strip_blur
             and not has_patch_blur
+            # Surface must also be sharp enough to justify the edge-lap fallback.
+            # has_glossy_sharp_product is an explicit exception: smooth-by-design
+            # products (white projectors, polished lenses) have surface_lap < 15
+            # by definition and are handled by their own guard in section 7c.
+            # For everything else (laptops, metal panels), a surface_lap below 15
+            # means the product surface itself is soft — don't mask that with the
+            # high Laplacian from isolated features like grille holes or stickers.
+            and (has_glossy_sharp_product or surface_lap_var > 15)
         )
 
         # ── 8. SOFT CONFIDENCE VOTING ─────────────────────────────────────────
@@ -793,6 +801,22 @@ class QualityCheckService:
             center_lap_var < 120 and laplacian_var < 120
             and tenengrad_score < 600
             and not has_sharp_subject
+        ) or (
+            # Soft product surface on bright studio/white-desk background.
+            # surface_lap_var < 15 means the product interior is extremely smooth —
+            # too soft to be a usable product photo. Isolated sharp features like
+            # a ventilation grille or barcode sticker can push has_sharp_subject=True
+            # and suppress the normal soft-vote system, but the SURFACE itself is
+            # still unacceptably blurry.
+            # Exception: has_glossy_sharp_product covers smooth-by-design items
+            # (white projectors, polished lenses) whose interior is textureless
+            # because the surface is genuinely mirror-smooth, not because it's out
+            # of focus. Also require the product to fill at least 10% of the frame
+            # so this never fires on a tiny product surrounded by white space.
+            has_bright_background and surface_lap_var < 15
+            and not has_glossy_sharp_product
+            and is_product_photo_layout
+            and product_pixel_count > (h_img * w_img * 0.10)
         )
         if absolute_reject:
             blur_confidence = 1.0
