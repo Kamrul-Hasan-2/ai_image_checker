@@ -323,37 +323,37 @@ class ImageChecker:
             promo_risk = promo_confidence_ocr
 
             # Check for VERY STRONG promotional signals first (overrides everything).
-            # Kept in sync with main.py: these are clear promotional indicators that
-            # must be flagged even on product photos (e.g. a promotional sticker
-            # overlaid on the product body).
+            # Kept in sync with main.py: a phone number or a website/social link by
+            # itself is decisive — a seller's contact info overlaid on an otherwise
+            # genuine product photo is still promotional, even without a price.
             very_strong_promo = (
-                (has_phone_number and strong_price_indicator) or  # Phone + real price
-                (has_phone_number and has_link) or                # Phone + website
+                has_phone_number or                                # Any BD phone number = clear promo
+                has_link or                                        # Any website/social link = clear promo
                 (has_ecommerce_ui and strong_price_indicator) or  # E-commerce UI + real price
-                (has_button_ui and has_phone_number) or           # Buttons + phone
-                (strong_price_indicator and has_link) or          # Real price + link
                 has_promotional_sticker                           # Promotional sticker on product
             )
 
-            # HIGHEST PRIORITY: Product photo detection (CLIP-based)
+            # HIGHEST PRIORITY: very strong promotional signals (phone/link/etc.)
+            # override every other check below — including "looks like a product
+            # photo", since a seller's contact info overlaid on a genuine product
+            # photo is still promotional content.
+            if very_strong_promo:
+                promotional_detected = True
+                promo_risk = 0.95
+            # SECOND PRIORITY: Product photo detection (CLIP-based)
             # If CLIP detects it's a product photo, text is part of product, NOT promotional
-            # EXCEPTION: still flag if very strong promotional signals are present.
-            if is_product_photo and product_photo_confidence > 0.30 and not very_strong_promo:
+            elif is_product_photo and product_photo_confidence > 0.30:
                 # Product photo = text on product is specs/branding, NOT promotional
                 promotional_detected = False
                 promo_risk = 0.0
-            elif is_product_photo and product_photo_confidence > 0.30 and very_strong_promo:
-                # Product photo BUT strong promo signals (e.g. sticker) → PROMOTIONAL
-                promotional_detected = True
-                promo_risk = 0.95
-            # SECOND PRIORITY: Image body verification with lower threshold
+            # THIRD PRIORITY: Image body verification with lower threshold
             # If image shows the actual product body (e.g., RAM module, phone, camera)
             # Then text on the image is product labeling, NOT promotional
             elif image_body_match and body_match_confidence > 0.1:
                 # Image content matches what it should show = product labels, NOT promotional
                 promotional_detected = False
                 promo_risk = 0.0
-            # THIRD PRIORITY: Product text only (text physically on product body)
+            # FOURTH PRIORITY: Product text only (text physically on product body)
             elif is_product_text_only:
                 # Text is PART OF THE PRODUCT (like "INSULATING" on tool, "Canon" on camera)
                 # This is NOT promotional - it's product branding/labeling

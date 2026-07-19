@@ -368,31 +368,44 @@ class ImageChecker:
             # ========================================================================
             # PROMOTIONAL DETECTION LOGIC - CRITICAL FOR PRODUCT IMAGES
             # ========================================================================
-            # Four-tier detection system:
-            # 
-            # 1. PRODUCT TITLE MATCHING (HIGHEST PRIORITY):
-            #    - If product title provided and matches OCR text (>= 60% words match)
-            #    - Text is the product name/description = NOT promotional
-            #    - Example: Title "Dell Inspiron 15" matches "Dell Inspiron 15 3000" in OCR
+            # Five-tier detection system:
             #
-            # 2. VISUAL PRODUCT DETECTION (CLIP-based):
+            # 0. STRONG SIGNAL OVERRIDE (HIGHEST PRIORITY — checked before anything else):
+            #    - Any BD phone number found in the image (017/013/014/015/016/018/019...,
+            #      +880/+88 prefixed, or Bengali digits) = PROMOTIONAL, no exceptions.
+            #    - Any website/social link found (www., .com, .net, .bd, .org, fb.com,
+            #      whatsapp, telegram, imo, viber, messenger, ...) = PROMOTIONAL, no exceptions.
+            #    - Also: promotional sticker, or e-commerce UI + real price.
+            #    - This overrides "looks like a product photo" — a seller's phone number
+            #      or website overlaid on a genuine product photo is still promotional.
+            #
+            # 1. VISUAL PRODUCT DETECTION (CLIP-based):
             #    - If image shows actual product (e.g., camera in box, phone on table)
             #    - Text on product/packaging is NOT promotional
             #    - Example: "Imou 3K 5MP" on camera box = SAFE
             #    - Even if text contains specs/model numbers = SAFE
             #
-            # 3. TEXT-ONLY PRODUCT DETECTION (OCR-based):
+            # 2. TEXT-ONLY PRODUCT DETECTION (OCR-based):
             #    - If text has NO price, phone, link, or e-commerce UI
             #    - AND no strong sale terms (buy now, discount, etc.)
             #    - Then it's likely just product branding = SAFE
             #    - Example: "Samsung Galaxy A54" without price = SAFE
             #
-            # 4. PROMOTIONAL SIGNALS (Multi-signal):
+            # 3. PRODUCT TITLE MATCHING:
+            #    - If product title provided and matches OCR text (>= 60% words match)
+            #    - Text is the product name/description = NOT promotional
+            #    - Example: Title "Dell Inspiron 15" matches "Dell Inspiron 15 3000" in OCR
+            #
+            # 4. PROMOTIONAL SIGNALS (Multi-signal fallback):
             #    - Price + phone = PROMOTIONAL
             #    - E-commerce UI buttons = PROMOTIONAL
             #    - Contact info = PROMOTIONAL
             #
-            # Priority: Title match > Visual detection > Text detection > Signal detection
+            # Priority: Strong override > Visual detection > Text detection > Title match > Signal detection
+            #
+            # NOTE: "car/bike/real estate/livestock" categories are exempt entirely
+            # (see exception_categories below) — phone numbers are legitimate contact
+            # info in those listings and are never flagged.
             # ========================================================================
             
             # Promotional detection - RESPECT product title and photo flags
@@ -401,47 +414,51 @@ class ImageChecker:
             promo_risk = promo_confidence_ocr
             
             # Check for VERY STRONG promotional signals first (overrides everything)
-            # These are clear promotional indicators that should be detected even on product photos
+            # These are clear promotional indicators that should be detected even on product photos.
+            # A phone number or a link/website (www./.com/.net/.bd/.org/social handles) by itself is
+            # treated as decisive: real product photos legitimately carry model numbers/specs, but a
+            # BD mobile number (017/013/014/... or +88...) or a website/social link overlaid on an
+            # image is always seller contact info — never legitimate product text.
             # strong_price_indicator requires a currency symbol (৳, $, ₹) or a
             # comma-formatted number (e.g. 24,999). This excludes bare model
             # numbers like "1500" on a UPS or "600D" on a camera.
             very_strong_promo = (
-                (has_phone_number and strong_price_indicator) or  # Phone + real price = clear promo
-                (has_phone_number and has_link) or                # Phone + website = clear promo
+                has_phone_number or                                # Any BD phone number = clear promo (seller contact overlay)
+                has_link or                                        # Any website/social link = clear promo (www./.com/.net/.bd/fb/whatsapp...)
                 (has_ecommerce_ui and strong_price_indicator) or  # E-commerce UI + real price = clear promo
-                (has_button_ui and has_phone_number) or           # Buttons + phone = clear promo
-                (strong_price_indicator and has_link) or          # Real price + link (not just a model number)
                 has_promotional_sticker                           # Promotional sticker on product
             )
-            
-            # HIGHEST PRIORITY: Product photo detection (CLIP-based)
+
+            # HIGHEST PRIORITY: very strong promotional signals (phone number, link, etc.)
+            # override every other check below — including "this looks like a real
+            # product photo", since a seller's phone number/website overlaid on an
+            # otherwise genuine product photo is still promotional content.
+            if very_strong_promo:
+                promotional_detected = True
+                promo_risk = 0.95
+                print(f"⚠️  Promotional check: STRONG PROMO signals (phone/link/price+ui/sticker) → PROMOTIONAL")
+            # SECOND PRIORITY: Product photo detection (CLIP-based)
             # If CLIP detects it's a product photo, text is part of product, NOT promotional
-            # EXCEPTION: Still flag if very strong promotional signals detected
-            if is_product_photo and product_photo_confidence > 0.30 and not very_strong_promo:
+            elif is_product_photo and product_photo_confidence > 0.30:
                 # Product photo = text on product is specs/branding, NOT promotional
                 promotional_detected = False
                 promo_risk = 0.0
                 print(f"✅ Promotional check: PRODUCT PHOTO detected → NOT promotional")
-            elif is_product_photo and product_photo_confidence > 0.30 and very_strong_promo:
-                # Product photo BUT has very strong promo signals (e.g., sticker on product)
-                promotional_detected = True
-                promo_risk = 0.95  # High confidence - sticker/overlay on product
-                print(f"⚠️  Promotional check: PRODUCT PHOTO but STRONG PROMO signals → PROMOTIONAL")
-            # SECOND PRIORITY: Image body verification with lower threshold
+            # THIRD PRIORITY: Image body verification with lower threshold
             # If image shows the actual product body (e.g., RAM module, phone, camera)
             elif image_body_match and body_match_confidence > 0.20:
                 # Product body shown = text is definitely product specs, NOT promotional
                 promotional_detected = False
                 promo_risk = 0.0
                 print(f"✅ Promotional check: BODY MATCH detected → NOT promotional")
-            # THIRD PRIORITY: Product text-only detection (OCR-based)
+            # FOURTH PRIORITY: Product text-only detection (OCR-based)
             # If text has absolutely NO promotional signals (no price, no phone, no UI)
             elif is_product_text_only:
                 # No promotional signals = safe to assume it's product info
                 promotional_detected = False
                 promo_risk = 0.0
                 print(f"✅ Promotional check: PRODUCT TEXT ONLY → NOT promotional")
-            # FOURTH PRIORITY: Title/Description matching
+            # FIFTH PRIORITY: Title/Description matching
             # If product title/description provided AND matches OCR text
             elif is_title_match and not title_description_mismatch:
                 # Title matches = text is product name/specs, NOT promotional

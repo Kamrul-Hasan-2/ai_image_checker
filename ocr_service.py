@@ -10,6 +10,8 @@ import numpy as np
 from PIL import Image
 from typing import Dict, List, Tuple
 
+import brand_whitelist
+
 
 class OCRService:
     def __init__(self, languages: List[str] = ['en'], model_storage_directory: str = None):
@@ -17,6 +19,10 @@ class OCRService:
         import torch
         use_gpu = torch.cuda.is_available()
         print(f"Loading EasyOCR model for languages: {languages} (GPU: {use_gpu})")
+
+        # Warm the brand-name whitelist cache at startup (best-effort — a
+        # failed fetch here just means an empty whitelist until it succeeds).
+        brand_whitelist.refresh()
 
         if model_storage_directory:
             self.reader = easyocr.Reader(
@@ -180,6 +186,18 @@ class OCRService:
         # "Stall" as its own box even when the full joined text is long.
         _ocr_word_count = len(full_text_lower.split())
         _ocr_box_texts_lower = [b["text"].lower() for b in extracted_data]
+
+        # Refresh the brand whitelist if its TTL has expired (no-op otherwise),
+        # then build a version of the OCR text with known-brand-name boxes
+        # removed. Boxes that are *exactly* a known brand (e.g. "Samsung",
+        # "Walton") never count toward seller/business-overlay keyword checks
+        # below, so a legitimate brand name isn't mistaken for a watermark just
+        # because it also happens to contain a generic business word.
+        brand_whitelist.refresh()
+        non_brand_text_lower = " ".join(
+            b["text"] for b in extracted_data if not brand_whitelist.is_known_brand(b["text"])
+        ).lower()
+
         bdstall_found = (
             "bdstall" in full_text_lower
             or "stall.com" in full_text_lower
@@ -202,7 +220,7 @@ class OCRService:
         # The APC UPS back panel has 83 words → safely excluded.
         seller_watermark_found = (
             _ocr_word_count <= 20
-            and any(kw in full_text_lower for kw in seller_overlay_keywords)
+            and any(kw in non_brand_text_lower for kw in seller_overlay_keywords)
         )
 
         # SKIP word repetition check for speed
@@ -307,8 +325,10 @@ class OCRService:
         ]
         
         # Check for seller/business names (e.g., "Mobile Zone")
+        # Uses non_brand_text_lower so a known brand name (e.g. "Walton") isn't
+        # flagged just because it also contains a business_indicators word.
         words_in_text = full_text_lower.split()
-        has_business_name = any(indicator in full_text_lower for indicator in business_indicators)
+        has_business_name = any(indicator in non_brand_text_lower for indicator in business_indicators)
         
         # If text has business indicators + it's overlaid on image = promotional
         # More lenient: allow even single word + indicator (e.g., "MOBILE" + "ZONE")
