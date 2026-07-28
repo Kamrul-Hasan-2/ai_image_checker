@@ -112,7 +112,7 @@ Respond ONLY with valid JSON (no markdown):
         )
         raw = response.choices[0].message.content or ""
     except Exception as e:
-        raw = f'{{"decision":"APPROVE","confidence":50,"explanation":"Groq error: {str(e)[:100]}","violations":[],"is_promotional":false,"is_ai_generated":false,"has_watermark":false,"categories_detected":[],"recommended_action":"approve"}}'
+        raw = f'{{"decision":"APPROVE","confidence":50,"explanation":"Groq error: {str(e)[:100]}","violations":[],"is_promotional":false,"is_ai_generated":false,"has_watermark":false,"categories_detected":[],"recommended_action":"approve","_moderation_ok":false}}'
 
     # Parse JSON
     try:
@@ -138,6 +138,7 @@ def _fallback_result(text: str) -> Dict:
         "has_watermark": False,
         "categories_detected": [],
         "recommended_action": "manual review recommended",
+        "_moderation_ok": False,  # the model call/parse failed — these fields are guesses, not a real verdict
     }
 
 
@@ -392,5 +393,6 @@ def groq_moderate_image(image: Image.Image, clip_analysis: Optional[Dict] = None
             "has_watermark": False,
             "categories_detected": [],
             "recommended_action": "approve",
+            "_moderation_ok": False,  # no key configured — this is not a real verdict
         }
     return _groq_moderate(image, clip_analysis)

@@ -747,12 +747,18 @@ def detect_watermark_visual(
     overlay_tier1_thresh = (
         0.85 if (is_product_photo and product_photo_confidence > 0.60) else 0.70
     )
+    # Diagonal glare (specular highlight/reflection) is common on glossy product
+    # photography (phones, glass, plastic) and is not watermark-specific on its own.
+    # Raise the bar for confident product photos, same as the overlay signal above.
+    glare_tier1_thresh = (
+        0.55 if (is_product_photo and product_photo_confidence > 0.60) else 0.30
+    )
     if scores["transparent_overlay"] >= overlay_tier1_thresh:
         weighted_score = scores["transparent_overlay"]
         is_watermark   = True
         decision_reason = "transparent_overlay_strong"
 
-    elif scores["diagonal_glare"] >= 0.30:
+    elif scores["diagonal_glare"] >= glare_tier1_thresh:
         weighted_score = scores["diagonal_glare"]
         is_watermark   = True
         decision_reason = "diagonal_glare_strong"

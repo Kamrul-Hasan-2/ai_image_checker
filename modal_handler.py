@@ -254,6 +254,7 @@ class ImageChecker:
             qwen_promo_score = 0.0
             qwen_watermark_score = 0.0
             qwen_illegal_score = 0.0
+            qwen_result = None  # None = vision model didn't run / call failed — never treat as a verdict
 
             if self.qwen2b_service:
                 try:
@@ -264,6 +265,7 @@ class ImageChecker:
                     qwen_illegal_score   = 1.0 if "illegal_content" in qwen_result.get("violations", []) else 0.0
                 except Exception as qe:
                     print(f"⚠️  Qwen2-VL error: {qe}")
+                    qwen_result = None
             elif GROQ_API_KEY:
                 try:
                     qwen_result = groq_moderate_image(image)
@@ -273,6 +275,7 @@ class ImageChecker:
                     qwen_illegal_score   = 1.0 if "illegal_content" in qwen_result.get("violations", []) else 0.0
                 except Exception as ge:
                     print(f"⚠️  Groq error: {ge}")
+                    qwen_result = None
             
             # Calculate final scores - only flag clear mobile UI screenshots
             screenshot_detected = screenshot_confidence > 0.90
@@ -282,7 +285,19 @@ class ImageChecker:
             # Watermark detection is INDEPENDENT of promotional detection
             # Even product photos can have watermarks (bikroy, daraz, website logos)
             watermark_risk = ocr_risk * watermark_confidence_ocr
-            watermark_detected = watermark_risk > 0.2 or watermark_keywords or bd_marketplace
+            # watermark_keywords / bd_marketplace are precise string matches (stock-photo
+            # service name, BD marketplace domain) — trusted unconditionally. watermark_risk
+            # is a fuzzy text-coverage heuristic (can fire on any image with lots of printed
+            # text) — vetoed when the vision model actually looked and saw no watermark.
+            strong_watermark_match = watermark_keywords or bd_marketplace
+            weak_watermark_signal = watermark_risk > 0.2
+            if (
+                qwen_result is not None
+                and qwen_result.get("_moderation_ok", True)
+                and not qwen_result.get("has_watermark", False)
+            ):
+                weak_watermark_signal = False
+            watermark_detected = strong_watermark_match or weak_watermark_signal
             
             # Check if product text only (from OCR)
             is_product_text_only = ocr_result.get("is_product_text_only", False)

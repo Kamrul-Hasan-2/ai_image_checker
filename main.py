@@ -350,13 +350,30 @@ class ImageChecker:
             # Seller shop overlays are excluded for product photos since keywords like
             # "shop", "store", "house", "mart" are common in product names.
             watermark_risk = ocr_risk * watermark_confidence_ocr
+            # Explicit, high-precision string matches (marketplace domain / stock-photo
+            # or Watermarkly phrase) — these are trusted unconditionally.
+            strong_keyword_watermark = watermark_keywords or bd_marketplace
             if is_product_photo and product_photo_confidence > 0.30:
                 # For confirmed products: only explicit watermarks or BD marketplace matter
                 # seller_watermark produces too many false positives ("Mobile Shop Display" etc.)
-                keyword_watermark = watermark_keywords or bd_marketplace
+                weak_keyword_watermark = False
             else:
                 # For non-products: apply full watermark check including seller text
-                keyword_watermark = watermark_risk > 0.2 or watermark_keywords or bd_marketplace or seller_watermark
+                weak_keyword_watermark = watermark_risk > 0.2 or seller_watermark
+
+            # ── VISION-MODEL VETO ─────────────────────────────────────────────────
+            # Qwen/Groq actually looks at the image; the OpenCV visual detector and the
+            # generic seller-keyword match are proxies that can misfire on ordinary
+            # glare, backdrops, or brand/business text. When the vision model ran and
+            # confidently reports no watermark, don't let those weak/proxy signals alone
+            # flip the result — but never override a strong, precise keyword match.
+            if qwen_raw is not None and qwen_raw.get("_moderation_ok", True) and not qwen_raw.get("has_watermark", False):
+                if weak_keyword_watermark or visual_watermark_detected:
+                    print("ℹ️  Vision-model veto: no watermark seen, ignoring weak heuristic signal(s)")
+                weak_keyword_watermark = False
+                visual_watermark_detected = False
+
+            keyword_watermark = strong_keyword_watermark or weak_keyword_watermark
 
             # Final watermark decision: keyword OR visual — either is sufficient
             # For product photos, visual detector uses a higher threshold (see watermark_detector.py)

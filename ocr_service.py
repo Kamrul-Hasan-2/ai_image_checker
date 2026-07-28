@@ -165,8 +165,15 @@ class OCRService:
 
         # Seller shop name overlays — stamped on product photos by resellers.
         # Examples: "POSTED ON JII MOBILE SHOP", "XYZ Enterprise", "Dhaka Bazar"
-        seller_overlay_keywords = [
+        # Explicit overlay phrases are unambiguous stamp language — one match is enough.
+        seller_overlay_phrases = [
             "posted on", "mobile shop", "posted by",
+        ]
+        # Generic business words are common in legitimate brand/product names too
+        # (e.g. "Photo Gallery Frame", "Dream House" toy set) — a single hit is not
+        # a reliable overlay signal, so these require >= 2 co-occurring matches
+        # (an actual shop-name stamp like "XYZ Trading Enterprise" hits several).
+        seller_overlay_words = [
             "shop", "store", "enterprise", "traders", "trading",
             "house", "mart", "zone", "center", "centre",
             "outlet", "showroom", "bazar", "market", "gallery",
@@ -218,9 +225,13 @@ class OCRService:
         # Seller overlay watermarks — short OCR text is the key guard.
         # Dense product spec text (80+ words) will never trigger this.
         # The APC UPS back panel has 83 words → safely excluded.
+        _seller_word_hit_count = sum(1 for kw in seller_overlay_words if kw in non_brand_text_lower)
         seller_watermark_found = (
             _ocr_word_count <= 20
-            and any(kw in non_brand_text_lower for kw in seller_overlay_keywords)
+            and (
+                any(ph in non_brand_text_lower for ph in seller_overlay_phrases)
+                or _seller_word_hit_count >= 2
+            )
         )
 
         # SKIP word repetition check for speed
