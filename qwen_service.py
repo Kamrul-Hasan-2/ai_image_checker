@@ -3,7 +3,7 @@ Qwen2-VL Service for detailed image moderation.
 
 Two backends controlled by .env flags:
   USE_QWEN2VL=True   → local Qwen2-VL-2B model (GPU required)
-  GROQ_API_KEY=...   → cloud Groq API with a vision-capable model (default: llama-4-scout)
+  GROQ_API_KEY=...   → cloud Groq API with a vision-capable model (default: qwen3.6-27b)
 
 When USE_QWEN2VL=False the local model is never loaded.
 Groq is always available as a vision-capable path when a key is set.
@@ -26,8 +26,10 @@ def _env_bool(key: str, default: bool = False) -> bool:
 
 USE_QWEN2VL  = _env_bool("USE_QWEN2VL", False)
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
-# Default to Llama 4 Scout — vision-capable, fast, free tier on Groq
-GROQ_MODEL   = os.environ.get("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").strip()
+# Llama 4 Scout was shut down by Groq on 2026-07-17. Default to Qwen 3.6 27B —
+# the vision-capable replacement Groq recommends (the other option, gpt-oss-120b,
+# is text-only and cannot see the image).
+GROQ_MODEL   = os.environ.get("GROQ_MODEL", "qwen/qwen3.6-27b").strip()
 
 
 # ---------------------------------------------------------------------------
