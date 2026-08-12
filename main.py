@@ -38,6 +38,13 @@ class CheckRequest(BaseModel):
     description: Optional[str] = Field(None, example="14 inch business laptop with Intel Core i5")
     images: List[ImageItem] = Field(..., example=[{"id": 1, "position_id": 1, "image": "https://cdn.bdstall.com/product-image/sample.jpg"}])
     pipeline: Optional[str] = Field("full", example="full")
+    shipping_weight: Optional[float] = Field(None, example=0.4, description="Seller-submitted shipping weight in kg")
+
+# Weight sanity check: seller-submitted shipping_weight vs the product's known
+# published weight. Error catalog entry (https://www.bdstall.com/api/item_ai/ai_error_list/):
+# error_id 24 = "Weight differs from recorded product weight".
+WEIGHT_MISMATCH_ERROR_ID = 24
+WEIGHT_TOLERANCE_FACTOR  = 1.10  # allow up to 10% over the known product weight
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -53,7 +60,8 @@ except ImportError:
 from quality_service import QualityCheckService
 from ocr_service import OCRService
 from clip_service import CLIPService
-from qwen_service import USE_QWEN2VL, GROQ_API_KEY, GROQ_MODEL, get_qwen_service, groq_moderate_image
+from qwen_service import USE_QWEN2VL, GROQ_API_KEY, GROQ_MODEL, get_qwen_service, groq_moderate_image, estimate_known_product_weight_kg
+from weight_reference import plausible_max_weight_kg
 from screenshot_detector import compute_screenshot_score, apply_screenshot_decision
 from promotional_detector import detect_promotional_text
 from watermark_detector import detect_watermark_visual
@@ -591,7 +599,81 @@ class ImageChecker:
             })
             
             return error_result
-    
+
+    async def _check_shipping_weight(
+        self, shipping_weight, title, category, description
+    ) -> Dict[str, Any]:
+        """
+        Two-layer check on a seller-submitted shipping_weight (kg):
+
+        1. AI lookup of the *specific* product's known published weight (via Groq,
+           text-only). Precise: flags when given weight exceeds known weight + 10%
+           tolerance (packaging etc.). Only fires on a confident, named-model match.
+        2. Fallback: when the AI doesn't recognize the specific model (generic/
+           no-name listings — most of the catalog), fall back to a category-level
+           plausibility ceiling so obviously wrong values (e.g. 350kg for a
+           Bluetooth speaker) still get caught instead of silently passing.
+
+        Both layers are fail-open: an unrecognized product AND an unrecognized
+        category means no reference point exists, so nothing is flagged.
+        """
+        if shipping_weight is None:
+            return {"weight_mismatch": 0}
+
+        if title and GROQ_API_KEY:
+            loop = asyncio.get_event_loop()
+            weight_info = await loop.run_in_executor(
+                _executor, estimate_known_product_weight_kg, title, category, description
+            )
+            known_weight = weight_info.get("known_weight_kg")
+            if weight_info.get("_lookup_ok") and known_weight is not None:
+                allowed_max = known_weight * WEIGHT_TOLERANCE_FACTOR
+                exceeded = shipping_weight > allowed_max
+                print(f"⚖️  Weight check (model-specific): given={shipping_weight}kg, "
+                      f"known≈{known_weight}kg (confidence={weight_info.get('confidence')}), "
+                      f"allowed_max={allowed_max:.3f}kg, exceeded={exceeded}")
+                return {
+                    "weight_mismatch": WEIGHT_MISMATCH_ERROR_ID if exceeded else 0,
+                    "_debug": {
+                        "weight_check_method": "ai_known_weight",
+                        "given_shipping_weight_kg": shipping_weight,
+                        "known_product_weight_kg": known_weight,
+                        "allowed_max_weight_kg": round(allowed_max, 3),
+                        "weight_confidence": weight_info.get("confidence"),
+                    },
+                }
+
+        # Fallback: AI doesn't know this specific product — use a category-level
+        # plausibility ceiling instead of skipping the check entirely.
+        category_max = plausible_max_weight_kg(category)
+        if category_max is not None and shipping_weight > category_max:
+            print(f"⚖️  Weight check (category sanity): given={shipping_weight}kg exceeds "
+                  f"plausible ceiling {category_max}kg for category='{category}'")
+            return {
+                "weight_mismatch": WEIGHT_MISMATCH_ERROR_ID,
+                "_debug": {
+                    "weight_check_method": "category_sanity_range",
+                    "given_shipping_weight_kg": shipping_weight,
+                    "category_max_plausible_kg": category_max,
+                },
+            }
+
+        return {"weight_mismatch": 0}
+
+    @staticmethod
+    def _apply_weight_check(results: List[Any], weight_check: Dict[str, Any]) -> None:
+        """Merge the once-per-request weight check onto every per-image result dict."""
+        error_id = weight_check.get("weight_mismatch", 0)
+        debug_info = weight_check.get("_debug")
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            r["weight_mismatch"] = error_id
+            if error_id:
+                r["risk_level"] = max(r.get("risk_level", 0), error_id)
+            if debug_info:
+                r.setdefault("_debug", {}).update(debug_info)
+
     async def check_image(self, job_input: Dict[str, Any]) -> Dict[str, Any]:
         """
         Main handler - processes multiple images in parallel.
@@ -601,6 +683,7 @@ class ImageChecker:
             common_category  = job_input.get("category", "unknown")
             common_title     = job_input.get("title")
             common_description = job_input.get("description")
+            shipping_weight  = job_input.get("shipping_weight")
 
             # Multiple images — process ALL concurrently
             if "images" in job_input:
@@ -608,7 +691,11 @@ class ImageChecker:
                 if not images_list:
                     return {"error": "No images provided"}
 
-                tasks = []
+                # Product-level weight check runs in the same gather() as the
+                # per-image tasks so it doesn't add sequential latency.
+                tasks = [self._check_shipping_weight(
+                    shipping_weight, common_title, common_category, common_description
+                )]
                 for img_data in images_list:
                     image_input = img_data.get("image")
                     category    = img_data.get("category", common_category)
@@ -631,9 +718,10 @@ class ImageChecker:
                             title, description, image_id, position_id
                         ))
 
-                # All images run at the same time
-                results = await asyncio.gather(*tasks, return_exceptions=False)
-                return list(results)
+                # All images (+ the weight check) run at the same time
+                weight_check, *results = await asyncio.gather(*tasks, return_exceptions=False)
+                self._apply_weight_check(results, weight_check)
+                return results
 
             # Single image
             else:
@@ -647,10 +735,17 @@ class ImageChecker:
                 if not image_input:
                     return {"error": "No image provided"}
 
-                return await self.process_single_image(
-                    image_input, category, pipeline_mode,
-                    title, description, image_id, position_id
+                weight_check, result = await asyncio.gather(
+                    self._check_shipping_weight(
+                        shipping_weight, common_title, common_category, common_description
+                    ),
+                    self.process_single_image(
+                        image_input, category, pipeline_mode,
+                        title, description, image_id, position_id
+                    ),
                 )
+                self._apply_weight_check([result], weight_check)
+                return result
 
         except Exception as e:
             return {"error": str(e), "traceback": traceback.format_exc()}

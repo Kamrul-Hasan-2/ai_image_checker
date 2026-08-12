@@ -30,6 +30,9 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 # the vision-capable replacement Groq recommends (the other option, gpt-oss-120b,
 # is text-only and cannot see the image).
 GROQ_MODEL   = os.environ.get("GROQ_MODEL", "qwen/qwen3.6-27b").strip()
+# Plain-text lookups (e.g. known product weight) don't need a vision model —
+# use a production-grade text model instead of the vision preview model.
+GROQ_TEXT_MODEL = os.environ.get("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +59,74 @@ def _image_to_base64(image: Image.Image) -> str:
     buf = io.BytesIO()
     image.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Known product weight lookup (text-only — no image involved)
+# ---------------------------------------------------------------------------
+def estimate_known_product_weight_kg(
+    title: str,
+    category: Optional[str] = None,
+    description: Optional[str] = None,
+) -> Dict:
+    """
+    Ask Groq for the manufacturer-published net product weight (kg) of a specific
+    product model, from the model's own knowledge — no browsing, no external
+    database. Used to sanity-check a seller-submitted shipping_weight.
+
+    Returns {"known_weight_kg": float|None, "confidence": "high"/"medium"/"low", "_lookup_ok": bool}.
+    _lookup_ok=False means the call/parse failed — callers must treat that as
+    "unknown" and skip the check, never as a confirmed weight.
+    """
+    if not GROQ_API_KEY:
+        return {"known_weight_kg": None, "confidence": "low", "_lookup_ok": False}
+
+    context = f"Category: {category}\n" if category else ""
+    if description:
+        context += f"Description: {description}\n"
+
+    prompt = f"""What is the manufacturer-published net product weight, in kilograms, of this exact product model (the device itself, NOT the shipping/box weight)?
+
+Product title: {title}
+{context}
+If you know this specific model's published weight with reasonable confidence, return it. If the title is generic, ambiguous, or you don't reliably know the specific model's weight, return null for known_weight_kg — do not guess.
+
+Respond ONLY with JSON (no markdown):
+{{"known_weight_kg": 1.53, "confidence": "high/medium/low"}}"""
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model=GROQ_TEXT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=150,
+            temperature=0.1,
+        )
+        raw = response.choices[0].message.content or ""
+    except Exception as e:
+        print(f"⚠️  Groq weight-lookup error: {e}")
+        return {"known_weight_kg": None, "confidence": "low", "_lookup_ok": False}
+
+    try:
+        if "```json" in raw:
+            raw = raw.split("```json")[1].split("```")[0].strip()
+        elif "```" in raw:
+            raw = raw.split("```")[1].split("```")[0].strip()
+        j_start = raw.find("{")
+        j_end   = raw.rfind("}") + 1
+        parsed = json.loads(raw[j_start:j_end]) if j_start != -1 else {}
+    except json.JSONDecodeError:
+        return {"known_weight_kg": None, "confidence": "low", "_lookup_ok": False}
+
+    weight = parsed.get("known_weight_kg")
+    if not isinstance(weight, (int, float)) or weight <= 0:
+        weight = None
+
+    return {
+        "known_weight_kg": weight,
+        "confidence": parsed.get("confidence", "low"),
+        "_lookup_ok": True,
+    }
 
 
 # ---------------------------------------------------------------------------
