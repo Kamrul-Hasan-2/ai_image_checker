@@ -96,6 +96,11 @@ from ocr_service import OCRService
 from clip_service import CLIPService
 from qwen_service import USE_QWEN2VL, GROQ_API_KEY, GROQ_MODEL, get_qwen_service, groq_moderate_image, estimate_known_product_weight_kg
 from weight_reference import plausible_max_weight_kg
+from gemini_service import (
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    estimate_known_product_weight_kg as gemini_estimate_weight_kg,
+)
 from screenshot_detector import compute_screenshot_score, apply_screenshot_decision
 from bdstall_api import (
     ProductDetailsError,
@@ -156,6 +161,14 @@ class ImageChecker:
                 print(f"✅ Groq API configured (model: {GROQ_MODEL})")
             else:
                 print("⏭️  Groq API not configured (GROQ_API_KEY not set)")
+
+            provider = self._weight_lookup_provider()
+            if provider:
+                name = provider[0]
+                model = GEMINI_MODEL if name == "gemini" else GROQ_MODEL
+                print(f"✅ Weight lookup: {name} (model: {model})")
+            else:
+                print("⏭️  Weight lookup disabled — no GEMINI_API_KEY or GROQ_API_KEY")
 
             print("✅ All services initialized successfully")
         except Exception as e:
@@ -640,15 +653,31 @@ class ImageChecker:
             
             return error_result
 
+    @staticmethod
+    def _weight_lookup_provider():
+        """
+        (name, fn) for the product-weight lookup, or None when neither provider
+        is configured. Gemini wins when its key is set — it returns a packaged
+        weight alongside the net one, which is what the seller's declared
+        shipping weight is actually comparable to.
+        """
+        if GEMINI_API_KEY:
+            return "gemini", gemini_estimate_weight_kg
+        if GROQ_API_KEY:
+            return "groq", estimate_known_product_weight_kg
+        return None
+
     async def _check_shipping_weight(
         self, shipping_weight, title, category, description
     ) -> Dict[str, Any]:
         """
         Two-layer check on a seller-submitted shipping_weight (kg):
 
-        1. AI lookup of the *specific* product's known published weight (via Groq,
-           text-only). Precise: flags when given weight exceeds known weight + 10%
-           tolerance (packaging etc.). Only fires on a confident, named-model match.
+        1. AI lookup of the *specific* product's known published weight (Gemini
+           when GEMINI_API_KEY is set, else Groq; text-only). Precise: flags when
+           the given weight exceeds the product's packaged weight — or its net
+           weight, whichever the model knows and whichever is higher — plus a 10%
+           tolerance. Only fires on a confident, named-model match.
         2. Fallback: when the AI doesn't recognize the specific model (generic/
            no-name listings — most of the catalog), fall back to a category-level
            plausibility ceiling so obviously wrong values (e.g. 350kg for a
@@ -660,24 +689,40 @@ class ImageChecker:
         if shipping_weight is None:
             return {"weight_mismatch": 0}
 
-        if title and GROQ_API_KEY:
+        provider = self._weight_lookup_provider()
+        if title and provider:
+            provider_name, lookup_fn = provider
             loop = asyncio.get_event_loop()
             weight_info = await loop.run_in_executor(
-                _executor, estimate_known_product_weight_kg, title, category, description
+                _executor, lookup_fn, title, category, description
             )
-            known_weight = weight_info.get("known_weight_kg")
+            known_weight    = weight_info.get("known_weight_kg")
+            packaged_weight = weight_info.get("packaged_weight_kg")
+
             if weight_info.get("_lookup_ok") and known_weight is not None:
-                allowed_max = known_weight * WEIGHT_TOLERANCE_FACTOR
-                exceeded = shipping_weight > allowed_max
-                print(f"⚖️  Weight check (model-specific): given={shipping_weight}kg, "
-                      f"known≈{known_weight}kg (confidence={weight_info.get('confidence')}), "
+                # Sellers declare a *shipping* weight, so the ceiling should be the
+                # packaged weight when the model knows it — measuring a boxed item
+                # against its bare net weight is what produced false flags. max()
+                # means this only ever widens the allowance: nothing gets flagged
+                # here that the net-weight rule wouldn't have flagged too.
+                reference   = max(known_weight, packaged_weight or 0)
+                allowed_max = reference * WEIGHT_TOLERANCE_FACTOR
+                exceeded    = shipping_weight > allowed_max
+
+                print(f"⚖️  Weight check (model-specific via {provider_name}): "
+                      f"given={shipping_weight}kg, net≈{known_weight}kg, "
+                      f"packaged≈{packaged_weight}kg "
+                      f"(confidence={weight_info.get('confidence')}), "
                       f"allowed_max={allowed_max:.3f}kg, exceeded={exceeded}")
+
                 return {
                     "weight_mismatch": WEIGHT_MISMATCH_ERROR_ID if exceeded else 0,
                     "_debug": {
                         "weight_check_method": "ai_known_weight",
+                        "weight_lookup_provider": provider_name,
                         "given_shipping_weight_kg": shipping_weight,
                         "known_product_weight_kg": known_weight,
+                        "packaged_product_weight_kg": packaged_weight,
                         "allowed_max_weight_kg": round(allowed_max, 3),
                         "weight_confidence": weight_info.get("confidence"),
                     },
@@ -801,7 +846,9 @@ class ImageChecker:
         runs the image pipeline only on images that haven't been checked yet
         (ai_verified 0 or 1), and returns one {image_id, position_id, error_id}
         entry per error found. Clean images — and images already at
-        ai_verified=2 — simply don't appear.
+        ai_verified=2 — don't appear in `results`; `checked` lists every image
+        that was actually evaluated, so the caller knows exactly which ones it
+        may flip to ai_verified=2.
 
         Raises ProductDetailsError when the listing can't be fetched, so the
         caller gets an error instead of an empty "all clean" result.
@@ -815,7 +862,7 @@ class ImageChecker:
               f"image(s) need checking (ai_verified 0 or 1)")
 
         if not pending:
-            return {"results": []}
+            return {"results": [], "checked": []}
 
         results = await self.check_image({
             "category": data.get("category") or "unknown",
@@ -827,14 +874,26 @@ class ImageChecker:
 
         # check_image only returns a dict when the whole batch blew up.
         if isinstance(results, dict):
-            return {"results": [], "error": results.get("error", "image check failed")}
+            return {
+                "results": [],
+                "checked": [],
+                "error": results.get("error", "image check failed"),
+            }
 
         return self._to_error_entries(results)
 
     @staticmethod
     def _to_error_entries(results: List[Any]) -> Dict[str, Any]:
-        """Flatten per-image flag dicts into BDStall's {image_id, position_id, error_id} rows."""
+        """
+        Flatten per-image flag dicts into BDStall's {image_id, position_id, error_id}
+        rows, alongside which images were actually evaluated.
+
+        `checked` exists so the caller doesn't have to infer it: an image is
+        absent from `results` both when it came back clean and when it was never
+        looked at, and only the former may be flipped to ai_verified=2.
+        """
         entries: List[Dict[str, Any]] = []
+        checked: List[Any] = []
         skipped: List[Dict[str, Any]] = []
 
         for r in results:
@@ -854,6 +913,8 @@ class ImageChecker:
                 })
                 continue
 
+            checked.append(image_id)
+
             for field, error_id in IMAGE_ERROR_IDS:
                 if r.get(field):
                     entries.append({
@@ -862,7 +923,7 @@ class ImageChecker:
                         "error_id": error_id,
                     })
 
-        response: Dict[str, Any] = {"results": entries}
+        response: Dict[str, Any] = {"results": entries, "checked": checked}
         if skipped:
             response["skipped"] = skipped
         return response
@@ -954,8 +1015,10 @@ async def process_image(data: CheckRequest):
     `error_id` values are BDStall's own `error_list` ids — 2 category mismatch,
     3 promotional text, 4 watermark, 5 blur, 6 background, 8 screenshot,
     9 illegal, 10 stock photo. Images that are clean, or already at
-    `ai_verified` 2, don't appear. Images that couldn't be fetched or processed
-    are reported under `skipped` instead of being reported as clean.
+    `ai_verified` 2, don't appear in `results`. `checked` lists every image that
+    was actually evaluated — set `ai_verified = 2` on exactly those. Images that
+    couldn't be fetched or processed are reported under `skipped` instead of
+    being reported as clean, and should be left for the next run to retry.
 
     Weight mismatch is no longer part of this response — see `/weight_checker`.
 

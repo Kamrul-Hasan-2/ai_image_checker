@@ -65,11 +65,16 @@ and returns one entry per error actually found:
   "results": [
     { "image_id": 458504, "position_id": 0, "error_id": 5 },
     { "image_id": 458504, "position_id": 0, "error_id": 4 }
-  ]
+  ],
+  "checked": [458504, 458505]
 }
 ```
 
-Clean images, and images already at `ai_verified: 2`, don't appear at all.
+Clean images, and images already at `ai_verified: 2`, don't appear in `results`.
+`checked` lists every image that was actually evaluated — the caller sets
+`ai_verified = 2` on exactly those, so a photo added mid-check never gets marked
+verified without being looked at.
+
 `error_id` values are BDStall's own `error_list` ids:
 
 | `error_id` | Check |
@@ -87,7 +92,7 @@ An image that couldn't be downloaded or processed is reported under a `skipped`
 array (present only when non-empty) rather than being silently reported as clean:
 
 ```json
-{ "results": [], "skipped": [{ "image_id": 458507, "position_id": 3, "reason": "..." }] }
+{ "results": [], "checked": [], "skipped": [{ "image_id": 458507, "position_id": 3, "reason": "..." }] }
 ```
 
 An unknown listing returns HTTP 404; an unreachable `product_details` returns HTTP 502 —
@@ -131,9 +136,23 @@ When the declared weight is implausible for the product, `error_id: 24`
 | `BDSTALL_API_KEY` | `123_456` |
 | `BDSTALL_PRODUCT_DETAILS_TIMEOUT` | `15` (seconds) |
 | `BDSTALL_PRODUCT_DETAILS_TTL_SECONDS` | `60` — response cache, so `image_checker` and `weight_checker` for the same listing only fetch once |
+| `GEMINI_API_KEY` | — set it to use Gemini for the `weight_checker` product lookup |
+| `GEMINI_MODEL` | `gemini-2.5-flash` |
+| `GEMINI_TIMEOUT_SECONDS` | `20` |
+
+The weight lookup uses **Gemini when `GEMINI_API_KEY` is set**, and falls back to Groq
+otherwise. Gemini returns the product's *packaged* weight alongside its net weight, and
+the allowance is taken from whichever is higher — a seller declares a shipping weight, so
+comparing a boxed item against its bare net weight is what caused false flags. Startup
+logs which provider is active.
 
 Every endpoint is also registered under the `/api/moderation_ai/` prefix
 (`POST /api/moderation_ai/image_checker/`, `POST /api/moderation_ai/weight_checker/`).
+
+**Integrating from BDStall's PHP side?** See
+[shippingandimag.md](shippingandimag.md) — full request/response reference, the
+`ai_verification_avator` update rules, working `check_image_api()` /
+`check_weight_api()` code, and a migration checklist.
 
 ---
 
@@ -226,6 +245,7 @@ If OCR finds "Imou 3K 5MP Cruiser SC Remote viewing" on the image, it matches 5/
 ai_image_checker/
 ├── main.py                # FastAPI app (the ai.bdstall.com deployment)
 ├── bdstall_api.py         # product_details client (id-only contract)
+├── gemini_service.py      # Gemini product-weight lookup (weight_checker)
 ├── modal_handler.py       # Modal deployment file
 ├── quality_service.py     # OpenCV quality checks
 ├── ocr_service.py         # Text extraction and analysis
