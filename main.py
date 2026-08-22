@@ -65,6 +65,34 @@ class CheckRequest(BaseModel):
 WEIGHT_MISMATCH_ERROR_ID = 24
 WEIGHT_TOLERANCE_FACTOR  = 1.10  # allow up to 10% over the known product weight
 
+def _fmt_kg(value) -> str:
+    """Format a weight for human-facing prose — 3.2, 0.45, 200 — with no trailing zeros."""
+    return f"{float(value):.3f}".rstrip("0").rstrip(".") or "0"
+
+
+def _weight_narration(declared, estimated=None, category=None, category_max=None) -> Optional[str]:
+    """
+    One plain sentence explaining a weight mismatch.
+
+    BDStall shows sellers Bangla text and builds its own message from
+    declared_weight_kg/estimated_weight_kg, so this is a fallback only — it stays
+    factual and free of advice.
+    """
+    if estimated is not None:
+        direction = "above" if declared > estimated else "below"
+        return (
+            f"Declared shipping weight ({_fmt_kg(declared)} kg) is well {direction} the "
+            f"estimated actual weight ({_fmt_kg(estimated)} kg) for this product."
+        )
+    if category_max is not None:
+        return (
+            f"Declared shipping weight ({_fmt_kg(declared)} kg) exceeds the maximum "
+            f"plausible weight ({_fmt_kg(category_max)} kg) for a "
+            f"{category or 'product'} listing."
+        )
+    return None
+
+
 # Per-image check -> BDStall error_list id, for the id-only response. Mapped by
 # field name, never by the flag's value: a soft screenshot flag sets
 # screen_short=4, which would otherwise be misread as the watermark id.
@@ -689,6 +717,10 @@ class ImageChecker:
         if shipping_weight is None:
             return {"weight_mismatch": 0}
 
+        # Kept outside the block below so the category-ceiling layer can still
+        # report an advisory estimate when the exact model wasn't recognized.
+        typical_weight = None
+
         provider = self._weight_lookup_provider()
         if title and provider:
             provider_name, lookup_fn = provider
@@ -698,6 +730,7 @@ class ImageChecker:
             )
             known_weight    = weight_info.get("known_weight_kg")
             packaged_weight = weight_info.get("packaged_weight_kg")
+            typical_weight  = weight_info.get("typical_weight_kg")
 
             if weight_info.get("_lookup_ok") and known_weight is not None:
                 # Sellers declare a *shipping* weight, so the ceiling should be the
@@ -715,8 +748,16 @@ class ImageChecker:
                       f"(confidence={weight_info.get('confidence')}), "
                       f"allowed_max={allowed_max:.3f}kg, exceeded={exceeded}")
 
+                # What we believe the listing actually weighs, for the seller to
+                # correct towards. The packaged figure is the like-for-like
+                # comparison to a declared shipping weight.
+                estimated = packaged_weight or known_weight
+
                 return {
                     "weight_mismatch": WEIGHT_MISMATCH_ERROR_ID if exceeded else 0,
+                    "declared_weight_kg": shipping_weight,
+                    "estimated_weight_kg": round(estimated, 3),
+                    "narration": _weight_narration(shipping_weight, estimated) if exceeded else None,
                     "_debug": {
                         "weight_check_method": "ai_known_weight",
                         "weight_lookup_provider": provider_name,
@@ -736,14 +777,25 @@ class ImageChecker:
                   f"plausible ceiling {category_max}kg for category='{category}'")
             return {
                 "weight_mismatch": WEIGHT_MISMATCH_ERROR_ID,
+                "declared_weight_kg": shipping_weight,
+                # The exact model wasn't recognized, so this is a type-level
+                # estimate — advisory, and not what triggered the flag.
+                "estimated_weight_kg": round(typical_weight, 3) if typical_weight else None,
+                "narration": _weight_narration(
+                    shipping_weight,
+                    estimated=typical_weight,
+                    category=category,
+                    category_max=category_max,
+                ),
                 "_debug": {
                     "weight_check_method": "category_sanity_range",
                     "given_shipping_weight_kg": shipping_weight,
                     "category_max_plausible_kg": category_max,
+                    "typical_product_weight_kg": typical_weight,
                 },
             }
 
-        return {"weight_mismatch": 0}
+        return {"weight_mismatch": 0, "declared_weight_kg": shipping_weight}
 
     @staticmethod
     def _apply_weight_check(results: List[Any], weight_check: Dict[str, Any]) -> None:
@@ -954,8 +1006,24 @@ class ImageChecker:
 
         error_id = weight_check.get("weight_mismatch", 0)
         response: Dict[str, Any] = {"weight_mismatch": bool(error_id)}
-        if error_id:
-            response["error_id"] = error_id
+
+        if not error_id:
+            return response
+
+        # On a mismatch, hand back the numbers behind the verdict so the seller
+        # sees how far off they are and what to correct towards, rather than a
+        # bare "weight differs" with nothing to act on.
+        response["error_id"] = error_id
+        response["declared_weight_kg"] = weight_check.get("declared_weight_kg", declared_kg)
+
+        estimated = weight_check.get("estimated_weight_kg")
+        if estimated is not None:
+            response["estimated_weight_kg"] = estimated
+
+        narration = weight_check.get("narration")
+        if narration:
+            response["narration"] = narration
+
         return response
 
 

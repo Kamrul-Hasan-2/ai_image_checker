@@ -130,14 +130,47 @@ with HTTP 200 genuinely means every checked image was clean.
 { "weight_mismatch": false }
 ```
 
-When the declared weight is implausible for the product:
+When the declared weight is implausible for the product, the numbers behind the verdict
+come back with it:
 
 ```json
-{ "weight_mismatch": true, "error_id": 24 }
+{
+  "weight_mismatch": true,
+  "error_id": 24,
+  "declared_weight_kg": 200,
+  "estimated_weight_kg": 4.2,
+  "narration": "Declared shipping weight (200 kg) is well above the estimated actual weight (4.2 kg) for this product."
+}
 ```
 
 `error_id 24` = *"Weight differs from recorded product weight"*. It is a **listing-level**
 error — there is no `image_id`.
+
+| Field | When present | Meaning |
+|---|---|---|
+| `weight_mismatch` | always | The verdict |
+| `error_id` | on mismatch | Always `24` |
+| `declared_weight_kg` | on mismatch | The `shipping_weight_kg` value read from `product_details` and actually compared against — echoed back, not re-fetched, so your message always matches what was judged |
+| `estimated_weight_kg` | on mismatch, when derivable | What the AI believes the listing really weighs, packaged |
+| `narration` | on mismatch, when derivable | One English sentence. **Fallback only** — build the Bangla message from the two numbers |
+
+When `weight_mismatch` is `false`, none of the extra fields appear.
+
+`estimated_weight_kg` is an **advisory** number for a human to act on — it never decides
+the verdict (see below). Treat it as missing-able: a listing can be flagged by the
+category ceiling with no product-level estimate available, in which case only
+`narration` explains the flag. Build your seller message defensively:
+
+```php
+if (isset($response['estimated_weight_kg'])) {
+    // "ঘোষিত ওজন X কেজি, আনুমানিক প্রকৃত ওজন Y কেজি"
+    $msg = $this->weight_message_bn($response['declared_weight_kg'], $response['estimated_weight_kg']);
+} elseif (!empty($response['narration'])) {
+    $msg = $response['narration'];
+} else {
+    $msg = $this->default_error_text(24);
+}
+```
 
 ### How the verdict is reached
 
@@ -146,38 +179,46 @@ So you know what a flag means when a seller disputes one:
 1. **Model-specific (Gemini).** The AI looks up the product's published *net* weight and
    its typical *packaged* weight (device + box + accessories). The allowance is the higher
    of the two, plus 10%. Because sellers declare a **shipping** weight, the packaged figure
-   is the fair comparison — a 0.23 kg phone genuinely ships in a 0.45 kg box.
+   is the fair comparison — a 0.23 kg phone genuinely ships in a ~0.38 kg box.
    This layer only fires when the AI recognises the exact model. Generic titles
    ("X-922 Bluetooth RGB Speaker") are deliberately not guessed at.
+   → `estimated_weight_kg` is the packaged weight of that model.
 2. **Category ceiling.** When the model isn't recognised, the weight is compared against a
    generous per-category plausibility ceiling, so unit mistakes (350 kg for a speaker) are
    still caught.
+   → `estimated_weight_kg` is a *type-level* estimate ("what a Bluetooth speaker typically
+   weighs"), which is why it's advisory only. It did not trigger the flag — the ceiling
+   did. It may be absent.
 3. **Fail open.** Unknown model *and* unrecognised category means no reference point
    exists — nothing is flagged. A pass is never a claim that the weight is correct, only
    that nothing contradicted it.
 
-### Action required on the BDStall side
+Only **over**-declared weights are flagged today: the check fires when the declared weight
+exceeds the ceiling, not when it falls below the estimate. Under-declaration (a seller
+shaving the shipping weight down) is not currently detected — say the word if you want
+that added.
 
-`product_details` currently returns **no numeric shipping weight**. Only a free-text
-`specification` entry like `"Weight": "Package Weight: Approximately 0.70 kg"` exists, and
-only for categories that happen to have a Weight spec field at all — most listings have an
-empty `specification` array. That text is deliberately **not** parsed: it isn't guaranteed
-to be present, numeric, or in kg, so guessing from it would flag listings on a misread
-string.
+### Repeatability
 
-Until a real field exists the endpoint fails open:
+The published net weight is a fact the model returns identically every time; the packaged
+figure is an estimate and does drift between calls. Lookups are therefore cached per
+product for 24 hours, so a seller who saves the same listing twice sees the same
+`estimated_weight_kg` twice rather than a number that wanders. Editing the title starts a
+fresh lookup, since that is a different product as far as the check is concerned.
+
+### Listings with no declared weight
+
+`product_details` now returns a numeric `shipping_weight_kg` — confirmed live on listing
+169830. Listings that don't carry one yet fail open:
 
 ```json
 { "weight_mismatch": false, "reason": "no_declared_shipping_weight" }
 ```
 
-**Please add a numeric `shipping_weight_kg` to the `product_details` response.** The AI
-service already reads it (it also accepts `shipping_weight` or `weight_kg`) and the
-comparison logic is implemented and working — it starts producing real verdicts the day
-the field appears, with no change needed on either side.
-
-You can still verify the endpoint is wired correctly before then: a `reason` of
-`no_declared_shipping_weight` means the call succeeded and only the input is missing.
+That is a successful call with nothing to compare against, not an error — treat it exactly
+like a clean pass. The free-text `specification` entry (`"Package Weight: Approximately
+0.70 kg"`) is deliberately **not** parsed as a substitute: it isn't guaranteed to be
+present, numeric, or in kg, and a misread string would flag a real seller.
 
 ---
 

@@ -115,18 +115,28 @@ endpoint.
 { "weight_mismatch": false }
 ```
 
-When the declared weight is implausible for the product, `error_id: 24`
-("Weight differs from recorded product weight") is included alongside
-`"weight_mismatch": true`.
+On a mismatch the numbers behind the verdict come back too, so the seller sees how far off
+they are instead of a bare boolean:
 
-> **Open gap:** `product_details` does not currently return a numeric
-> `shipping_weight_kg`. Only a free-text `specification` entry like
-> `"Package Weight: Approximately 0.70 kg"` exists, and only for categories that
-> happen to have a Weight spec field — that text is deliberately **not** parsed,
-> since it isn't guaranteed to be present, numeric, or in kg. Until BDStall adds a
-> real `shipping_weight_kg` field, this endpoint fails open with
-> `{"weight_mismatch": false, "reason": "no_declared_shipping_weight"}`.
-> The comparison logic itself is implemented and runs as soon as the field appears.
+```json
+{
+  "weight_mismatch": true,
+  "error_id": 24,
+  "declared_weight_kg": 200,
+  "estimated_weight_kg": 4.2,
+  "narration": "Declared shipping weight (200 kg) is well above the estimated actual weight (4.2 kg) for this product."
+}
+```
+
+`estimated_weight_kg` is advisory — it is what the product is believed to weigh packaged,
+shown to a human, and never what decides the flag. It can be absent when only the
+category-level ceiling fired. `narration` is a fallback for callers that don't build their
+own message.
+
+Listings whose `product_details` carries no numeric `shipping_weight_kg` fail open with
+`{"weight_mismatch": false, "reason": "no_declared_shipping_weight"}` — a successful call
+with nothing to compare against. The free-text `specification` weight is deliberately not
+parsed as a substitute, since it isn't guaranteed to be present, numeric, or in kg.
 
 ### Configuration
 
@@ -139,6 +149,7 @@ When the declared weight is implausible for the product, `error_id: 24`
 | `GEMINI_API_KEY` | — set it to use Gemini for the `weight_checker` product lookup |
 | `GEMINI_MODEL` | `gemini-2.5-flash` |
 | `GEMINI_TIMEOUT_SECONDS` | `20` |
+| `GEMINI_WEIGHT_CACHE_TTL_SECONDS` | `86400` — per-product lookup cache, so a listing checked twice reports the same estimate twice |
 
 The weight lookup uses **Gemini when `GEMINI_API_KEY` is set**, and falls back to Groq
 otherwise. Gemini returns the product's *packaged* weight alongside its net weight, and
