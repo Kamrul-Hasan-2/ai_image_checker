@@ -44,7 +44,101 @@ Update `test_modal.py` with your endpoint URL and run:
 python test_modal.py
 ```
 
-## API Usage
+## BDStall API (id-only)
+
+Both moderation endpoints take just a listing id and fetch the listing themselves
+from BDStall's `product_details` API — nothing has to be pushed in the request body.
+
+### `POST /image_checker/`
+
+```json
+{ "id": 141462 }
+```
+
+The service fetches
+`https://www.bdstall.com/api/item_ai/product_details/?key=123_456&id=141462`,
+checks **only** images whose `ai_verified` is `0` or `1` (`2` means already checked),
+and returns one entry per error actually found:
+
+```json
+{
+  "results": [
+    { "image_id": 458504, "position_id": 0, "error_id": 5 },
+    { "image_id": 458504, "position_id": 0, "error_id": 4 }
+  ]
+}
+```
+
+Clean images, and images already at `ai_verified: 2`, don't appear at all.
+`error_id` values are BDStall's own `error_list` ids:
+
+| `error_id` | Check |
+|---|---|
+| 2 | Category mismatch |
+| 3 | Promotional text |
+| 4 | Watermark |
+| 5 | Blur image |
+| 6 | Background error |
+| 8 | Screenshot |
+| 9 | Illegal |
+| 10 | Stock photo |
+
+An image that couldn't be downloaded or processed is reported under a `skipped`
+array (present only when non-empty) rather than being silently reported as clean:
+
+```json
+{ "results": [], "skipped": [{ "image_id": 458507, "position_id": 3, "reason": "..." }] }
+```
+
+An unknown listing returns HTTP 404; an unreachable `product_details` returns HTTP 502 —
+never an empty "all clean" result.
+
+The legacy payload (`{category, title, description, images: [...]}`) still works and
+still returns one flag object per image, so callers can switch over on their own
+schedule.
+
+### `POST /weight_checker/`
+
+Weight mismatch used to ride along on every `image_checker` result; it's now its own
+endpoint.
+
+```json
+{ "id": 141462 }
+```
+
+```json
+{ "weight_mismatch": false }
+```
+
+When the declared weight is implausible for the product, `error_id: 24`
+("Weight differs from recorded product weight") is included alongside
+`"weight_mismatch": true`.
+
+> **Open gap:** `product_details` does not currently return a numeric
+> `shipping_weight_kg`. Only a free-text `specification` entry like
+> `"Package Weight: Approximately 0.70 kg"` exists, and only for categories that
+> happen to have a Weight spec field — that text is deliberately **not** parsed,
+> since it isn't guaranteed to be present, numeric, or in kg. Until BDStall adds a
+> real `shipping_weight_kg` field, this endpoint fails open with
+> `{"weight_mismatch": false, "reason": "no_declared_shipping_weight"}`.
+> The comparison logic itself is implemented and runs as soon as the field appears.
+
+### Configuration
+
+| Env var | Default |
+|---|---|
+| `BDSTALL_PRODUCT_DETAILS_URL` | `https://www.bdstall.com/api/item_ai/product_details/` |
+| `BDSTALL_API_KEY` | `123_456` |
+| `BDSTALL_PRODUCT_DETAILS_TIMEOUT` | `15` (seconds) |
+| `BDSTALL_PRODUCT_DETAILS_TTL_SECONDS` | `60` — response cache, so `image_checker` and `weight_checker` for the same listing only fetch once |
+
+Every endpoint is also registered under the `/api/moderation_ai/` prefix
+(`POST /api/moderation_ai/image_checker/`, `POST /api/moderation_ai/weight_checker/`).
+
+---
+
+
+## API Usage (legacy direct-image contract)
 
 ```python
 import requests
@@ -130,7 +224,9 @@ If OCR finds "Imou 3K 5MP Cruiser SC Remote viewing" on the image, it matches 5/
 
 ```
 ai_image_checker/
-├── modal_handler.py       # Main Modal deployment file
+├── main.py                # FastAPI app (the ai.bdstall.com deployment)
+├── bdstall_api.py         # product_details client (id-only contract)
+├── modal_handler.py       # Modal deployment file
 ├── quality_service.py     # OpenCV quality checks
 ├── ocr_service.py         # Text extraction and analysis
 ├── clip_service.py        # CLIP model service

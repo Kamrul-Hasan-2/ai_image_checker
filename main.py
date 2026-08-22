@@ -32,19 +32,53 @@ class ImageItem(BaseModel):
     position_id: int = Field(..., example=1)
     image: str = Field(..., example="https://cdn.bdstall.com/product-image/sample.jpg")
 
+class ListingRequest(BaseModel):
+    """id-only request body used by /image_checker and /weight_checker."""
+    id: int = Field(..., example=141462, description="BDStall listing id")
+
 class CheckRequest(BaseModel):
-    category: str = Field(..., example="laptop")
+    """
+    /image_checker accepts two shapes:
+
+    * **id-only (preferred)** — `{"id": 141462}`. The listing's title, category,
+      description and images are fetched from BDStall's `product_details` API,
+      only images with `ai_verified` 0 or 1 are checked, and the response is
+      `{"results": [{"image_id", "position_id", "error_id"}, ...]}` carrying one
+      entry per error actually found.
+    * **legacy full payload** — `{category, title, description, images: [...]}`,
+      which still returns one flag object per image. Kept working so BDStall can
+      switch over on its own schedule; `shipping_weight`/`weight_mismatch` live
+      on /weight_checker now.
+    """
+    id: Optional[int] = Field(None, example=141462, description="BDStall listing id — send this alone for the id-only contract")
+    category: Optional[str] = Field(None, example="laptop")
     title: Optional[str] = Field(None, example="HP EliteBook 840 G8")
     description: Optional[str] = Field(None, example="14 inch business laptop with Intel Core i5")
-    images: List[ImageItem] = Field(..., example=[{"id": 1, "position_id": 1, "image": "https://cdn.bdstall.com/product-image/sample.jpg"}])
+    image: Optional[str] = Field(None, description="Legacy single-image URL or base64")
+    images: Optional[List[ImageItem]] = Field(None, example=[{"id": 1, "position_id": 1, "image": "https://cdn.bdstall.com/product-image/sample.jpg"}])
     pipeline: Optional[str] = Field("full", example="full")
-    shipping_weight: Optional[float] = Field(None, example=0.4, description="Seller-submitted shipping weight in kg")
+    shipping_weight: Optional[float] = Field(None, example=0.4, description="Legacy seller-submitted shipping weight in kg — use /weight_checker instead")
 
 # Weight sanity check: seller-submitted shipping_weight vs the product's known
 # published weight. Error catalog entry (https://www.bdstall.com/api/item_ai/ai_error_list/):
 # error_id 24 = "Weight differs from recorded product weight".
 WEIGHT_MISMATCH_ERROR_ID = 24
 WEIGHT_TOLERANCE_FACTOR  = 1.10  # allow up to 10% over the known product weight
+
+# Per-image check -> BDStall error_list id, for the id-only response. Mapped by
+# field name, never by the flag's value: a soft screenshot flag sets
+# screen_short=4, which would otherwise be misread as the watermark id.
+# The tuple order is the order errors appear for a given image.
+IMAGE_ERROR_IDS = (
+    ("blur_image",        5),   # Blurry image
+    ("watermark",         4),   # contains watermark or banner
+    ("promotional_text",  3),   # Promotional text found
+    ("screen_short",      8),   # Screenshot not allowed
+    ("category_mismatch", 2),   # Wrong category image
+    ("background_error",  6),   # Invalid background
+    ("illegal",           9),   # Prohibited image
+    ("stock_photo",      10),   # Stock image detected
+)
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -63,6 +97,12 @@ from clip_service import CLIPService
 from qwen_service import USE_QWEN2VL, GROQ_API_KEY, GROQ_MODEL, get_qwen_service, groq_moderate_image, estimate_known_product_weight_kg
 from weight_reference import plausible_max_weight_kg
 from screenshot_detector import compute_screenshot_score, apply_screenshot_decision
+from bdstall_api import (
+    ProductDetailsError,
+    fetch_product_details,
+    listing_images_pending_check,
+    listing_shipping_weight_kg,
+)
 from promotional_detector import detect_promotional_text
 from watermark_detector import detect_watermark_visual
 
@@ -750,6 +790,113 @@ class ImageChecker:
         except Exception as e:
             return {"error": str(e), "traceback": traceback.format_exc()}
 
+    # -----------------------------------------------------------------------
+    # id-only contract — the service fetches the listing itself
+    # -----------------------------------------------------------------------
+    async def check_listing(self, listing_id: int) -> Dict[str, Any]:
+        """
+        Check one listing by id.
+
+        Pulls title/category/description/images from BDStall's product_details,
+        runs the image pipeline only on images that haven't been checked yet
+        (ai_verified 0 or 1), and returns one {image_id, position_id, error_id}
+        entry per error found. Clean images — and images already at
+        ai_verified=2 — simply don't appear.
+
+        Raises ProductDetailsError when the listing can't be fetched, so the
+        caller gets an error instead of an empty "all clean" result.
+        """
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(_executor, fetch_product_details, listing_id)
+
+        pending = listing_images_pending_check(data)
+        total_images = len(data.get("images") or [])
+        print(f"🖼️  image_checker: listing {listing_id} — {len(pending)} of {total_images} "
+              f"image(s) need checking (ai_verified 0 or 1)")
+
+        if not pending:
+            return {"results": []}
+
+        results = await self.check_image({
+            "category": data.get("category") or "unknown",
+            "title": data.get("title"),
+            "description": data.get("description"),
+            "pipeline": "full",
+            "images": pending,
+        })
+
+        # check_image only returns a dict when the whole batch blew up.
+        if isinstance(results, dict):
+            return {"results": [], "error": results.get("error", "image check failed")}
+
+        return self._to_error_entries(results)
+
+    @staticmethod
+    def _to_error_entries(results: List[Any]) -> Dict[str, Any]:
+        """Flatten per-image flag dicts into BDStall's {image_id, position_id, error_id} rows."""
+        entries: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
+
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+
+            image_id    = r.get("id")
+            position_id = r.get("position_id", 0)
+
+            # An image we couldn't fetch/process isn't a clean image — report it
+            # separately so it doesn't get silently marked verified.
+            if r.get("error"):
+                skipped.append({
+                    "image_id": image_id,
+                    "position_id": position_id,
+                    "reason": str(r["error"]),
+                })
+                continue
+
+            for field, error_id in IMAGE_ERROR_IDS:
+                if r.get(field):
+                    entries.append({
+                        "image_id": image_id,
+                        "position_id": position_id,
+                        "error_id": error_id,
+                    })
+
+        response: Dict[str, Any] = {"results": entries}
+        if skipped:
+            response["skipped"] = skipped
+        return response
+
+    async def check_listing_weight(self, listing_id: int) -> Dict[str, Any]:
+        """
+        Weight-mismatch check for one listing by id — the half that used to ride
+        along on every image_checker result.
+
+        Fails open when product_details carries no numeric shipping weight:
+        there's nothing to compare against, so flagging would be a guess.
+        """
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(_executor, fetch_product_details, listing_id)
+
+        declared_kg = listing_shipping_weight_kg(data)
+        if declared_kg is None:
+            print(f"⚖️  weight_checker: listing {listing_id} — product_details carries no numeric "
+                  f"shipping weight (no 'shipping_weight_kg' field), nothing to compare against")
+            return {"weight_mismatch": False, "reason": "no_declared_shipping_weight"}
+
+        weight_check = await self._check_shipping_weight(
+            declared_kg,
+            data.get("title"),
+            data.get("category") or "unknown",
+            data.get("description"),
+        )
+
+        error_id = weight_check.get("weight_mismatch", 0)
+        response: Dict[str, Any] = {"weight_mismatch": bool(error_id)}
+        if error_id:
+            response["error_id"] = error_id
+        return response
+
 
 # FastAPI Startup Event
 @app.on_event("startup")
@@ -762,32 +909,91 @@ async def startup_event():
 
 
 # API Endpoints
-@app.post("/image_checker", summary="Check images for quality and content issues")
-@app.post("/image_checker/", include_in_schema=False)
-async def process_image(data: CheckRequest):
-    """
-    Analyze product images for:
-    - **blur** — out-of-focus or low-sharpness images
-    - **watermark** — visual or text watermarks
-    - **promotional_text** — overlaid marketing/promo text
-    - **screenshot** — screenshots instead of real product photos
-    - **category_mismatch** — image doesn't match the listed category
-    - **illegal** — prohibited content
-    - **stock_photo** — generic stock images
-    """
+def _ready_checker() -> "ImageChecker":
     if image_checker is None:
         raise HTTPException(status_code=503, detail="Services not initialized")
-    return await image_checker.check_image(data.model_dump())
+    return image_checker
+
+
+async def _dispatch_check(data: CheckRequest):
+    """Route a /image_checker body to the id-only or the legacy path."""
+    checker = _ready_checker()
+    payload = data.model_dump(exclude_none=True)
+
+    # Legacy payload — images were pushed to us, so `id` (if any) is an image id.
+    if payload.get("images") or payload.get("image"):
+        return await checker.check_image(payload)
+
+    listing_id = payload.get("id")
+    if listing_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail='Send {"id": <listing_id>}, or a legacy payload containing "images".',
+        )
+
+    try:
+        return await checker.check_listing(listing_id)
+    except ProductDetailsError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+
+
+@app.post("/image_checker", summary="Check a listing's images for quality and content issues")
+@app.post("/image_checker/", include_in_schema=False)
+@app.post("/api/moderation_ai/image_checker", include_in_schema=False)
+@app.post("/api/moderation_ai/image_checker/", include_in_schema=False)
+async def process_image(data: CheckRequest):
+    """
+    Send `{"id": <listing_id>}`. The listing is fetched from BDStall's
+    `product_details` API, only images with `ai_verified` 0 or 1 are analyzed,
+    and the response lists just the errors found:
+
+    ```json
+    {"results": [{"image_id": 458504, "position_id": 0, "error_id": 5}]}
+    ```
+
+    `error_id` values are BDStall's own `error_list` ids — 2 category mismatch,
+    3 promotional text, 4 watermark, 5 blur, 6 background, 8 screenshot,
+    9 illegal, 10 stock photo. Images that are clean, or already at
+    `ai_verified` 2, don't appear. Images that couldn't be fetched or processed
+    are reported under `skipped` instead of being reported as clean.
+
+    Weight mismatch is no longer part of this response — see `/weight_checker`.
+
+    The legacy payload (`category` + `images: [...]`) still works and still
+    returns one flag object per image.
+    """
+    return await _dispatch_check(data)
 
 
 @app.post("/image_checker/check", summary="Alternative check endpoint", include_in_schema=False)
 async def check_endpoint(data: CheckRequest):
-    if image_checker is None:
-        raise HTTPException(status_code=503, detail="Services not initialized")
-    return await image_checker.check_image(data.model_dump())
+    return await _dispatch_check(data)
+
+
+@app.post("/weight_checker", summary="Check a listing's declared shipping weight")
+@app.post("/weight_checker/", include_in_schema=False)
+@app.post("/api/moderation_ai/weight_checker", include_in_schema=False)
+@app.post("/api/moderation_ai/weight_checker/", include_in_schema=False)
+async def process_weight(data: ListingRequest):
+    """
+    Send `{"id": <listing_id>}` — returns `{"weight_mismatch": false}`, plus
+    `"error_id": 24` when the declared weight is implausible for the product.
+
+    The declared weight is read from `product_details`; it is **not** parsed out
+    of the free-text `specification` entries. Until `product_details` returns a
+    numeric `shipping_weight_kg`, there's nothing to compare against and this
+    fails open with `{"weight_mismatch": false, "reason":
+    "no_declared_shipping_weight"}`.
+    """
+    checker = _ready_checker()
+    try:
+        return await checker.check_listing_weight(data.id)
+    except ProductDetailsError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
 
 
 @app.get("/image_checker/health")
+@app.get("/weight_checker/health", include_in_schema=False)
 async def health_check():
     """Health check endpoint"""
     return {
@@ -805,17 +1011,17 @@ async def root():
         "name": "AI Image Checker",
         "version": "1.0.0",
         "endpoints": {
-            "POST /image_checker/": "Check images",
+            "POST /image_checker/": "Check a listing's images by id",
+            "POST /weight_checker/": "Check a listing's declared shipping weight by id",
             "POST /image_checker/check": "Alternative check endpoint",
             "GET /image_checker/health": "Health check"
         },
-        "example": {
+        "example": {"id": 141462},
+        "legacy_example": {
+            "category": "electronics",
+            "title": "Product Name",
             "images": [
-                {
-                    "image": "https://example.com/image.jpg",
-                    "category": "electronics",
-                    "title": "Product Name"
-                }
+                {"id": 1, "position_id": 0, "image": "https://example.com/image.jpg"}
             ],
             "pipeline": "full"
         }
@@ -839,7 +1045,8 @@ def main():
     print(f"Starting server on {args.host}:{args.port}")
     print(f"Workers: {args.workers}")
     print("\nAPI Documentation:")
-    print(f"  - POST http://{args.host}:{args.port}/image_checker/ - Check images")
+    print(f"  - POST http://{args.host}:{args.port}/image_checker/  - Check a listing's images by id")
+    print(f"  - POST http://{args.host}:{args.port}/weight_checker/ - Check a listing's shipping weight by id")
     print(f"  - GET  http://{args.host}:{args.port}/image_checker/health - Health check")
     print(f"  - GET  http://{args.host}:{args.port}/docs  - Swagger UI (interactive docs)")
     print(f"  - GET  http://{args.host}:{args.port}/redoc - ReDoc UI")
