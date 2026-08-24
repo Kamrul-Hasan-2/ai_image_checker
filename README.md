@@ -147,15 +147,17 @@ parsed as a substitute, since it isn't guaranteed to be present, numeric, or in 
 | `BDSTALL_PRODUCT_DETAILS_TIMEOUT` | `15` (seconds) |
 | `BDSTALL_PRODUCT_DETAILS_TTL_SECONDS` | `60` — response cache, so `image_checker` and `weight_checker` for the same listing only fetch once |
 | `GEMINI_API_KEY` | — set it to use Gemini for the `weight_checker` product lookup |
-| `GEMINI_MODEL` | `gemini-2.5-flash` |
+| `GEMINI_MODEL` | `gemini-2.5-flash-lite` |
 | `GEMINI_TIMEOUT_SECONDS` | `20` |
 | `GEMINI_WEIGHT_CACHE_TTL_SECONDS` | `86400` — per-product lookup cache, so a listing checked twice reports the same estimate twice |
 
-The weight lookup uses **Gemini when `GEMINI_API_KEY` is set**, and falls back to Groq
-otherwise. Gemini returns the product's *packaged* weight alongside its net weight, and
+The weight endpoint is **Gemini-only** and never initializes the local image, OCR, CLIP,
+or Qwen models. Those models are lazy-loaded only when `/image_checker` is first called.
+Gemini returns the product's *packaged* weight alongside its net weight, and
 the allowance is taken from whichever is higher — a seller declares a shipping weight, so
-comparing a boxed item against its bare net weight is what caused false flags. Startup
-logs which provider is active.
+comparing a boxed item against its bare net weight is what caused false flags. Gemini and
+product-details responses are cached, but cold-call latency still depends on both upstream
+networks and therefore cannot have a hard sub-second guarantee.
 
 Every endpoint is also registered under the `/api/moderation_ai/` prefix
 (`POST /api/moderation_ai/image_checker/`, `POST /api/moderation_ai/weight_checker/`).

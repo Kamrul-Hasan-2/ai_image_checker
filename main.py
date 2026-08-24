@@ -118,26 +118,79 @@ try:
 except ImportError:
     pass  # dotenv optional — values can be set as real env vars
 
-# Import services
-from quality_service import QualityCheckService
-from ocr_service import OCRService
-from clip_service import CLIPService
-from qwen_service import USE_QWEN2VL, GROQ_API_KEY, GROQ_MODEL, get_qwen_service, groq_moderate_image, estimate_known_product_weight_kg
-from weight_reference import plausible_max_weight_kg
+# Lightweight services used by the weight-only request path. Heavy image/ML
+# modules are imported by _load_image_dependencies() only when image_checker is
+# actually called.
 from gemini_service import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
     estimate_known_product_weight_kg as gemini_estimate_weight_kg,
 )
-from screenshot_detector import compute_screenshot_score, apply_screenshot_decision
 from bdstall_api import (
     ProductDetailsError,
     fetch_product_details,
     listing_images_pending_check,
     listing_shipping_weight_kg,
 )
-from promotional_detector import detect_promotional_text
-from watermark_detector import detect_watermark_visual
+
+QualityCheckService = None
+OCRService = None
+CLIPService = None
+USE_QWEN2VL = False
+GROQ_API_KEY = ""
+GROQ_MODEL = ""
+get_qwen_service = None
+groq_moderate_image = None
+estimate_known_product_weight_kg = None
+plausible_max_weight_kg = None
+compute_screenshot_score = None
+apply_screenshot_decision = None
+detect_promotional_text = None
+detect_watermark_visual = None
+
+
+def _load_image_dependencies() -> None:
+    """Import image/ML modules exactly once, on the first image request."""
+    global QualityCheckService, OCRService, CLIPService
+    global USE_QWEN2VL, GROQ_API_KEY, GROQ_MODEL
+    global get_qwen_service, groq_moderate_image, estimate_known_product_weight_kg
+    global plausible_max_weight_kg, compute_screenshot_score, apply_screenshot_decision
+    global detect_promotional_text, detect_watermark_visual
+
+    if QualityCheckService is not None:
+        return
+
+    from quality_service import QualityCheckService as quality_service_class
+    from ocr_service import OCRService as ocr_service_class
+    from clip_service import CLIPService as clip_service_class
+    from qwen_service import (
+        USE_QWEN2VL as use_qwen2vl,
+        GROQ_API_KEY as groq_api_key,
+        GROQ_MODEL as groq_model,
+        get_qwen_service as qwen_service_factory,
+        groq_moderate_image as groq_image_moderator,
+        estimate_known_product_weight_kg as groq_weight_lookup,
+    )
+    from weight_reference import plausible_max_weight_kg as category_weight_ceiling
+    from screenshot_detector import compute_screenshot_score as screenshot_score
+    from screenshot_detector import apply_screenshot_decision as screenshot_decision
+    from promotional_detector import detect_promotional_text as promo_detector
+    from watermark_detector import detect_watermark_visual as watermark_detector
+
+    QualityCheckService = quality_service_class
+    OCRService = ocr_service_class
+    CLIPService = clip_service_class
+    USE_QWEN2VL = use_qwen2vl
+    GROQ_API_KEY = groq_api_key
+    GROQ_MODEL = groq_model
+    get_qwen_service = qwen_service_factory
+    groq_moderate_image = groq_image_moderator
+    estimate_known_product_weight_kg = groq_weight_lookup
+    plausible_max_weight_kg = category_weight_ceiling
+    compute_screenshot_score = screenshot_score
+    apply_screenshot_decision = screenshot_decision
+    detect_promotional_text = promo_detector
+    detect_watermark_visual = watermark_detector
 
 # Create FastAPI app
 app = FastAPI(
@@ -159,6 +212,7 @@ app.add_middleware(
 
 # Global service instances
 image_checker = None
+_image_checker_init_lock = None
 
 
 class ImageChecker:
@@ -167,6 +221,7 @@ class ImageChecker:
     def __init__(self):
         """Initialize all services"""
         print("Initializing services...")
+        _load_image_dependencies()
         
         # Set environment variables
         os.environ["TRANSFORMERS_CACHE"] = os.path.expanduser("~/.cache/huggingface")
@@ -1027,26 +1082,90 @@ class ImageChecker:
         return response
 
 
+# Lightweight Gemini-only checker. It deliberately does not construct any of
+# the local image/OCR/CLIP services owned by ImageChecker.
+class GeminiWeightChecker:
+    async def check_listing_weight(self, listing_id: int) -> Dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(_executor, fetch_product_details, listing_id)
+
+        declared_kg = listing_shipping_weight_kg(data)
+        if declared_kg is None:
+            return {
+                "weight_mismatch": False,
+                "reason": "no_declared_shipping_weight",
+            }
+
+        if not GEMINI_API_KEY:
+            # A missing provider is a service configuration problem, not proof
+            # that a seller's weight is correct.
+            raise HTTPException(status_code=503, detail="Gemini weight lookup is not configured")
+
+        weight_info = await loop.run_in_executor(
+            _executor,
+            gemini_estimate_weight_kg,
+            data.get("title"),
+            data.get("category") or "unknown",
+            data.get("description"),
+        )
+
+        known_weight = weight_info.get("known_weight_kg")
+        packaged_weight = weight_info.get("packaged_weight_kg")
+        if not weight_info.get("_lookup_ok"):
+            raise HTTPException(status_code=502, detail="Gemini weight lookup failed")
+
+        # Gemini did answer, but could not identify the exact product. Do not
+        # substitute a local/category model: this endpoint is Gemini-only.
+        if known_weight is None:
+            return {"weight_mismatch": False, "reason": "product_weight_unknown"}
+
+        reference = max(known_weight, packaged_weight or 0)
+        allowed_max = reference * WEIGHT_TOLERANCE_FACTOR
+        exceeded = declared_kg > allowed_max
+        response: Dict[str, Any] = {"weight_mismatch": exceeded}
+
+        if exceeded:
+            estimated = packaged_weight or known_weight
+            response.update({
+                "error_id": WEIGHT_MISMATCH_ERROR_ID,
+                "declared_weight_kg": declared_kg,
+                "estimated_weight_kg": round(estimated, 3),
+                "narration": _weight_narration(declared_kg, estimated),
+            })
+
+        return response
+
+
+weight_checker = GeminiWeightChecker()
+
+
 # FastAPI Startup Event
 @app.on_event("startup")
 async def startup_event():
-    """Initialize services on startup"""
-    global image_checker
+    """Start without loading local models; image models are initialized lazily."""
     print("🚀 Starting up AI Image Checker server...")
-    image_checker = ImageChecker()
-    print("✅ Server ready to process images")
+    print("✅ API ready; image models will load on the first image_checker request")
 
 
 # API Endpoints
-def _ready_checker() -> "ImageChecker":
-    if image_checker is None:
-        raise HTTPException(status_code=503, detail="Services not initialized")
+async def _ready_checker() -> "ImageChecker":
+    global image_checker, _image_checker_init_lock
+    if image_checker is not None:
+        return image_checker
+
+    if _image_checker_init_lock is None:
+        _image_checker_init_lock = asyncio.Lock()
+
+    async with _image_checker_init_lock:
+        if image_checker is None:
+            loop = asyncio.get_running_loop()
+            image_checker = await loop.run_in_executor(_executor, ImageChecker)
     return image_checker
 
 
 async def _dispatch_check(data: CheckRequest):
     """Route a /image_checker body to the id-only or the legacy path."""
-    checker = _ready_checker()
+    checker = await _ready_checker()
     payload = data.model_dump(exclude_none=True)
 
     # Legacy payload — images were pushed to us, so `id` (if any) is an image id.
@@ -1116,9 +1235,8 @@ async def process_weight(data: ListingRequest):
     fails open with `{"weight_mismatch": false, "reason":
     "no_declared_shipping_weight"}`.
     """
-    checker = _ready_checker()
     try:
-        return await checker.check_listing_weight(data.id)
+        return await weight_checker.check_listing_weight(data.id)
     except ProductDetailsError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
 
@@ -1131,7 +1249,9 @@ async def health_check():
         "status": "healthy",
         "service": "AI Image Checker",
         "version": "1.0.0",
-        "ready": image_checker is not None
+        "ready": True,
+        "image_models_ready": image_checker is not None,
+        "weight_checker_ready": bool(GEMINI_API_KEY),
     }
 
 

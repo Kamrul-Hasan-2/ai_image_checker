@@ -36,7 +36,7 @@ from typing import Dict, Optional, Tuple
 import requests
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
 GEMINI_API_BASE = os.environ.get(
     "GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"
 ).strip()
@@ -195,7 +195,10 @@ def estimate_known_product_weight_kg(
         }],
         "generationConfig": {
             "temperature": 0,
-            "maxOutputTokens": 2048,
+            # The response is a tiny JSON object. Keeping the output ceiling low
+            # and disabling thinking removes avoidable generation latency.
+            "maxOutputTokens": 256,
+            "thinkingConfig": {"thinkingBudget": 0},
             "responseMimeType": "application/json",
             "responseSchema": _WEIGHT_SCHEMA,
         },
