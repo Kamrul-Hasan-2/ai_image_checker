@@ -69,6 +69,14 @@ WEIGHT_TOLERANCE_FACTOR  = 1.10  # allow up to 10% over the known product weight
 # an allowed_max of 0.033 kg and a seller declaring the 0.1 kg minimum gets
 # flagged for a weight they had no way to declare any lower.
 MIN_SHIPPING_WEIGHT_KG = 0.1
+# A percentage tolerance alone is far too tight on light items: 10% of a 0.15 kg
+# estimate is 15 grams, which no real parcel can respect — a boxed 0.15 kg
+# temperature meter genuinely ships at 0.25 kg once the carton, padding and the
+# courier's rounded-up slab are counted, and sellers were being flagged for it.
+# So allow a flat absolute slack as well and flag only when the declared weight
+# clears BOTH limits. On heavy items the percentage is the larger of the two, so
+# this changes nothing there — it only stops the nuisance flags on small goods.
+WEIGHT_ABSOLUTE_SLACK_KG = 0.2
 
 
 def _floor_weight_kg(value):
@@ -76,6 +84,15 @@ def _floor_weight_kg(value):
     if value is None:
         return None
     return max(float(value), MIN_SHIPPING_WEIGHT_KG)
+
+
+def _allowed_max_weight_kg(reference: float) -> float:
+    """
+    Highest shipping weight still accepted for a product estimated at `reference`
+    kg — the more generous of the percentage tolerance and the absolute slack.
+    """
+    return max(reference * WEIGHT_TOLERANCE_FACTOR,
+               reference + WEIGHT_ABSOLUTE_SLACK_KG)
 
 
 def _fmt_kg(value) -> str:
@@ -807,7 +824,7 @@ class ImageChecker:
                 # means this only ever widens the allowance: nothing gets flagged
                 # here that the net-weight rule wouldn't have flagged too.
                 reference   = max(known_weight, packaged_weight or 0)
-                allowed_max = reference * WEIGHT_TOLERANCE_FACTOR
+                allowed_max = _allowed_max_weight_kg(reference)
                 exceeded    = shipping_weight > allowed_max
 
                 print(f"⚖️  Weight check (model-specific via {provider_name}): "
@@ -1133,7 +1150,7 @@ class GeminiWeightChecker:
             return {"weight_mismatch": False, "reason": "product_weight_unknown"}
 
         reference = max(known_weight, packaged_weight or 0)
-        allowed_max = reference * WEIGHT_TOLERANCE_FACTOR
+        allowed_max = _allowed_max_weight_kg(reference)
         exceeded = declared_kg > allowed_max
         response: Dict[str, Any] = {"weight_mismatch": exceeded}
 

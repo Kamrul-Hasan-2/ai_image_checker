@@ -32,6 +32,9 @@ WEIGHT_TOLERANCE_FACTOR  = 1.10  # allow up to 10% over the known product weight
 # treated as 0.1 kg — otherwise a seller declaring the 0.1 kg minimum on a
 # 0.03 kg item gets flagged for a weight they could not declare any lower.
 MIN_SHIPPING_WEIGHT_KG = 0.1
+# See main.py: 10% of a light product is a few grams, tighter than any real
+# parcel, so the declared weight must clear the percentage AND a flat slack.
+WEIGHT_ABSOLUTE_SLACK_KG = 0.2
 
 # Create Modal app
 app = modal.App("ai-image-checker")
@@ -537,7 +540,8 @@ class ImageChecker:
             if known_weight is not None:
                 known_weight = max(float(known_weight), MIN_SHIPPING_WEIGHT_KG)
             if weight_info.get("_lookup_ok") and known_weight is not None:
-                allowed_max = known_weight * WEIGHT_TOLERANCE_FACTOR
+                allowed_max = max(known_weight * WEIGHT_TOLERANCE_FACTOR,
+                                  known_weight + WEIGHT_ABSOLUTE_SLACK_KG)
                 exceeded = shipping_weight > allowed_max
                 print(f"⚖️  Weight check (model-specific): given={shipping_weight}kg, "
                       f"known≈{known_weight}kg (confidence={weight_info.get('confidence')}), "
