@@ -28,6 +28,10 @@ from image_loader import load_image_safe
 # error_id 24 = "Weight differs from recorded product weight".
 WEIGHT_MISMATCH_ERROR_ID = 24
 WEIGHT_TOLERANCE_FACTOR  = 1.10  # allow up to 10% over the known product weight
+# Shipping is never billed below 0.1 kg, so a looked-up weight under that is
+# treated as 0.1 kg — otherwise a seller declaring the 0.1 kg minimum on a
+# 0.03 kg item gets flagged for a weight they could not declare any lower.
+MIN_SHIPPING_WEIGHT_KG = 0.1
 
 # Create Modal app
 app = modal.App("ai-image-checker")
@@ -530,6 +534,8 @@ class ImageChecker:
         if title and GROQ_API_KEY:
             weight_info = estimate_known_product_weight_kg(title, category, description)
             known_weight = weight_info.get("known_weight_kg")
+            if known_weight is not None:
+                known_weight = max(float(known_weight), MIN_SHIPPING_WEIGHT_KG)
             if weight_info.get("_lookup_ok") and known_weight is not None:
                 allowed_max = known_weight * WEIGHT_TOLERANCE_FACTOR
                 exceeded = shipping_weight > allowed_max

@@ -64,6 +64,19 @@ class CheckRequest(BaseModel):
 # error_id 24 = "Weight differs from recorded product weight".
 WEIGHT_MISMATCH_ERROR_ID = 24
 WEIGHT_TOLERANCE_FACTOR  = 1.10  # allow up to 10% over the known product weight
+# Shipping is never billed below 0.1 kg, so any weight the lookup returns under
+# that is treated as 0.1 kg. Without this, a 0.03 kg item (SD card, cable) gives
+# an allowed_max of 0.033 kg and a seller declaring the 0.1 kg minimum gets
+# flagged for a weight they had no way to declare any lower.
+MIN_SHIPPING_WEIGHT_KG = 0.1
+
+
+def _floor_weight_kg(value):
+    """Raise a looked-up weight to the 0.1 kg shipping minimum; None stays None."""
+    if value is None:
+        return None
+    return max(float(value), MIN_SHIPPING_WEIGHT_KG)
+
 
 def _fmt_kg(value) -> str:
     """Format a weight for human-facing prose — 3.2, 0.45, 200 — with no trailing zeros."""
@@ -783,9 +796,9 @@ class ImageChecker:
             weight_info = await loop.run_in_executor(
                 _executor, lookup_fn, title, category, description
             )
-            known_weight    = weight_info.get("known_weight_kg")
-            packaged_weight = weight_info.get("packaged_weight_kg")
-            typical_weight  = weight_info.get("typical_weight_kg")
+            known_weight    = _floor_weight_kg(weight_info.get("known_weight_kg"))
+            packaged_weight = _floor_weight_kg(weight_info.get("packaged_weight_kg"))
+            typical_weight  = _floor_weight_kg(weight_info.get("typical_weight_kg"))
 
             if weight_info.get("_lookup_ok") and known_weight is not None:
                 # Sellers declare a *shipping* weight, so the ceiling should be the
@@ -1109,8 +1122,8 @@ class GeminiWeightChecker:
             data.get("description"),
         )
 
-        known_weight = weight_info.get("known_weight_kg")
-        packaged_weight = weight_info.get("packaged_weight_kg")
+        known_weight = _floor_weight_kg(weight_info.get("known_weight_kg"))
+        packaged_weight = _floor_weight_kg(weight_info.get("packaged_weight_kg"))
         if not weight_info.get("_lookup_ok"):
             raise HTTPException(status_code=502, detail="Gemini weight lookup failed")
 
