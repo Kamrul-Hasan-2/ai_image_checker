@@ -95,6 +95,34 @@ def _allowed_max_weight_kg(reference: float) -> float:
                reference + WEIGHT_ABSOLUTE_SLACK_KG)
 
 
+# Market-price check: how far above the going rate a listing may sit before it
+# is flagged. Wide on purpose — real shops differ on the same item by a third
+# (warranty, import channel, stock age and bundled accessories all move the
+# number), so only a price clear of this margin is worth a human's attention.
+try:
+    PRICE_TOLERANCE_PCT = float(os.environ["PRICE_TOLERANCE_PCT"])
+except (KeyError, ValueError):
+    PRICE_TOLERANCE_PCT = 0.25
+# BDStall's error catalog has no price entry yet. Until one exists this stays
+# unset and the response carries a verdict without claiming a catalog id — a
+# made-up id would be filed against sellers under the wrong reason.
+try:
+    PRICE_MISMATCH_ERROR_ID = int(os.environ["PRICE_MISMATCH_ERROR_ID"])
+except (KeyError, ValueError):
+    PRICE_MISMATCH_ERROR_ID = None
+
+
+def _fmt_bdt(value) -> str:
+    """Format a price for human-facing prose — 3,800 — with no decimals."""
+    return f"{float(value):,.0f}"
+
+
+def _price_narration(our_price, market_price) -> str:
+    """One plain sentence naming both numbers, for the seller to act on."""
+    return (f"Listed at BDT {_fmt_bdt(our_price)}, above the BDT "
+            f"{_fmt_bdt(market_price)} other shops in Bangladesh charge for it.")
+
+
 def _fmt_kg(value) -> str:
     """Format a weight for human-facing prose — 3.2, 0.45, 200 — with no trailing zeros."""
     return f"{float(value):.3f}".rstrip("0").rstrip(".") or "0"
@@ -155,6 +183,9 @@ from gemini_service import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
     estimate_known_product_weight_kg as gemini_estimate_weight_kg,
+)
+from gemini_price_service import (
+    estimate_market_price_bdt as gemini_estimate_market_price,
 )
 from bdstall_api import (
     ProductDetailsError,
@@ -1166,7 +1197,82 @@ class GeminiWeightChecker:
         return response
 
 
+class GeminiPriceChecker:
+    """
+    Flags a listing priced above the going rate for the same product.
+
+    The market figure comes from a live Google Search run through Gemini. Only
+    *overpricing* is a finding: undercutting the market is a seller's own call,
+    not an error, so it reports clean like any correctly priced listing.
+
+    Fail-open throughout — no listing price, or no comparable product found in
+    Bangladesh, reports clean rather than accusing a seller on missing evidence.
+    """
+
+    async def check_listing_price(self, listing_id: int) -> Dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(_executor, fetch_product_details, listing_id)
+
+        our_price = data.get("price")
+        try:
+            our_price = float(our_price) if our_price is not None else None
+        except (TypeError, ValueError):
+            our_price = None
+        if not our_price or our_price <= 0:
+            return {"price_mismatch": False, "reason": "no_listing_price"}
+
+        if not GEMINI_API_KEY:
+            # A missing provider is a configuration problem, not evidence about
+            # the price — same stance as the weight endpoint.
+            raise HTTPException(status_code=503, detail="Gemini price lookup is not configured")
+
+        market = await loop.run_in_executor(
+            _executor,
+            gemini_estimate_market_price,
+            data.get("title"),
+            data.get("category"),
+            data.get("brand"),
+            data.get("condition"),
+            data.get("description"),
+        )
+
+        if not market.get("_lookup_ok"):
+            raise HTTPException(status_code=502, detail="Gemini price lookup failed")
+
+        # The median of the shop prices actually found, so one outlier listing
+        # cannot move it — see gemini_price_service.
+        market_price = market.get("typical_bdt")
+        if not market.get("found") or not market_price:
+            # The search ran and found no comparable Bangladeshi listing. Nothing
+            # to compare against, so nothing to report.
+            return {"price_mismatch": False, "reason": "no_market_price_found"}
+
+        allowed_max = market_price * (1 + PRICE_TOLERANCE_PCT)
+        exceeded = our_price > allowed_max
+
+        print(f"💰 Price check: listing {listing_id} at BDT {our_price:,.0f} vs market "
+              f"BDT {market_price:,.0f}, allowed_max BDT {allowed_max:,.0f}, "
+              f"exceeded={exceeded}")
+
+        if not exceeded:
+            return {"price_mismatch": False}
+
+        response: Dict[str, Any] = {
+            "price_mismatch": True,
+            "our_price_bdt": round(our_price, 2),
+            "market_price_bdt": market_price,
+            "difference_pct": round((our_price - market_price) / market_price * 100, 1),
+            "narration": _price_narration(our_price, market_price),
+        }
+        # BDStall's error catalog has no price entry yet, so the id is only
+        # reported once one is configured — see PRICE_MISMATCH_ERROR_ID.
+        if PRICE_MISMATCH_ERROR_ID is not None:
+            response["error_id"] = PRICE_MISMATCH_ERROR_ID
+        return response
+
+
 weight_checker = GeminiWeightChecker()
+price_checker = GeminiPriceChecker()
 
 
 # FastAPI Startup Event
@@ -1271,8 +1377,34 @@ async def process_weight(data: ListingRequest):
         raise HTTPException(status_code=e.status_code, detail=str(e))
 
 
+@app.post("/price_checker", summary="Flag a listing priced above the market")
+@app.post("/price_checker/", include_in_schema=False)
+@app.post("/api/moderation_ai/price_checker", include_in_schema=False)
+@app.post("/api/moderation_ai/price_checker/", include_in_schema=False)
+async def process_price(data: ListingRequest):
+    """
+    Send `{"id": <listing_id>}` — returns `{"price_mismatch": false}` when the
+    listing is not priced above the market, or `price_mismatch: true` with
+    `our_price_bdt`, `market_price_bdt`, `difference_pct` and a `narration`
+    when it is.
+
+    The market figure comes from a live Google Search of Bangladeshi shops, run
+    through Gemini. Only overpricing is reported: a listing cheaper than the
+    market is the seller's own call, not an error.
+
+    Slower than the other endpoints (a grounded search runs several queries and
+    reads pages before answering), so it is a per-listing lookup, not something
+    to call in a tight loop.
+    """
+    try:
+        return await price_checker.check_listing_price(data.id)
+    except ProductDetailsError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+
+
 @app.get("/image_checker/health")
 @app.get("/weight_checker/health", include_in_schema=False)
+@app.get("/price_checker/health", include_in_schema=False)
 async def health_check():
     """Health check endpoint"""
     return {
@@ -1282,6 +1414,7 @@ async def health_check():
         "ready": True,
         "image_models_ready": image_checker is not None,
         "weight_checker_ready": bool(GEMINI_API_KEY),
+        "price_checker_ready": bool(GEMINI_API_KEY),
     }
 
 
@@ -1294,6 +1427,7 @@ async def root():
         "endpoints": {
             "POST /image_checker/": "Check a listing's images by id",
             "POST /weight_checker/": "Check a listing's declared shipping weight by id",
+            "POST /price_checker/": "Flag a listing priced above the Bangladeshi market by id",
             "POST /image_checker/check": "Alternative check endpoint",
             "GET /image_checker/health": "Health check"
         },
@@ -1328,6 +1462,7 @@ def main():
     print("\nAPI Documentation:")
     print(f"  - POST http://{args.host}:{args.port}/image_checker/  - Check a listing's images by id")
     print(f"  - POST http://{args.host}:{args.port}/weight_checker/ - Check a listing's shipping weight by id")
+    print(f"  - POST http://{args.host}:{args.port}/price_checker/ - Flag a listing priced above the market by id")
     print(f"  - GET  http://{args.host}:{args.port}/image_checker/health - Health check")
     print(f"  - GET  http://{args.host}:{args.port}/docs  - Swagger UI (interactive docs)")
     print(f"  - GET  http://{args.host}:{args.port}/redoc - ReDoc UI")
