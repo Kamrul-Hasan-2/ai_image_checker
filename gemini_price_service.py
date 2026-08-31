@@ -19,10 +19,12 @@ That grounding forces two differences from gemini_service.py, both deliberate:
     must produce the same number twice. Prices genuinely move, so they are held
     only long enough to spare the repeated lookups of one moderation session.
 
-`offers` are what the model read off the shop pages; `sources` are the URLs
-Google actually served it, taken from the response's grounding metadata rather
-than from the model's own text — a model-written URL can be plausible and wrong,
-and these are shown to staff as evidence.
+`offers` are what the model read off the shop pages, one entry per shop —
+several listings of the same item on one marketplace are not several shops
+agreeing on a price. `sources` are the URLs Google actually served it, taken from
+the response's grounding metadata rather than from the model's own text — a
+model-written URL can be plausible and wrong, and these are shown to staff as
+evidence.
 
 Every failure path returns `_lookup_ok: False`, which callers must treat as
 "no market reading available" — never as "this listing is priced correctly" —
@@ -35,6 +37,7 @@ import re
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 
@@ -96,9 +99,16 @@ Reply with ONLY this JSON object and nothing else — no markdown fence, no comm
 Rules:
 - Prices must be in BDT for the Bangladeshi market. If a source is in USD or INR, convert it
   and say so in the seller name; never report a foreign price as if it were a local one.
-- List the distinct shops you actually found a price on, up to 5, in `offers`.
+- List the distinct shops you actually found a price on, up to 5, in `offers`. One entry
+  per shop: if a marketplace carries many listings of the item, report that marketplace
+  once at its representative price, never once per listing.
+- Report only a price you actually read in the search results, and only a `url` you actually
+  saw there. Never construct, complete or guess a product URL — use null when unsure.
 - Match the SAME product. A different model number, capacity, or generation is a different
   product — do not substitute it. Accessories and spare parts are not the product either.
+- Marketplace listings priced far below what established retailers charge are usually a
+  clone, a smaller variant or a mis-titled item. Leave them out rather than letting them
+  set `typical_bdt`.
 - If the product is generic/no-name, or you cannot find it on sale in Bangladesh, return
   {{"found": false, "confidence": "low"}} with no prices. Reporting a guessed price is worse
   than reporting none: a real seller gets accused over an invented number.
@@ -182,25 +192,61 @@ def _extract_json(text: str) -> Optional[Dict]:
         return None
 
 
+def _shop_key(seller: str, url: Optional[str]) -> str:
+    """
+    Which shop an offer belongs to — the URL host when there is one, because the
+    model writes the same marketplace under several names, otherwise the shop
+    name reduced to letters and digits.
+    """
+    if url:
+        host = urlparse(url).netloc.lower()
+        host = host[4:] if host.startswith("www.") else host
+        if host:
+            return host
+    return re.sub(r"[^a-z0-9]", "", seller.lower()) or "unknown"
+
+
 def _clean_offers(raw) -> List[Dict]:
-    """The model's per-shop findings, keeping only entries with a usable price."""
+    """
+    The model's findings as one entry per shop, keeping only usable prices.
+
+    A marketplace carries dozens of listings of the same item, and the model
+    reports several of them as if they were several shops — which is enough to
+    make one cluster of clone listings look like the whole market agreeing. So
+    entries are grouped by shop and each shop contributes a single price: the
+    median of what it was reported at, so its own outliers do not carry it.
+    """
     if not isinstance(raw, list):
         return []
-    offers = []
-    for item in raw[:5]:
+
+    by_shop: Dict[str, Dict] = {}
+    for item in raw[:15]:
         if not isinstance(item, dict):
             continue
         price = _coerce_price(item.get("price_bdt") or item.get("price"))
         if price is None:
             continue
         url = item.get("url")
+        url = url if isinstance(url, str) and url.startswith("http") else None
+        seller = str(item.get("seller") or "unknown")[:120]
+        shop = by_shop.setdefault(_shop_key(seller, url),
+                                  {"seller": seller, "url": url, "prices": []})
+        shop["prices"].append(price)
+        if shop["url"] is None:
+            shop["url"] = url
+
+    offers = []
+    for shop in by_shop.values():
+        prices = sorted(shop["prices"])
+        middle = len(prices) // 2
         offers.append({
-            "seller": str(item.get("seller") or "unknown")[:120],
-            "price_bdt": price,
-            "url": url if isinstance(url, str) and url.startswith("http") else None,
+            "seller": shop["seller"],
+            "price_bdt": (prices[middle] if len(prices) % 2
+                          else round((prices[middle - 1] + prices[middle]) / 2, 2)),
+            "url": shop["url"],
         })
     offers.sort(key=lambda o: o["price_bdt"])
-    return offers
+    return offers[:5]
 
 
 def _grounding_sources(candidate: Dict) -> Tuple[List[Dict], List[str]]:
@@ -342,10 +388,11 @@ def estimate_market_price_bdt(
     if low is not None and high is not None and low > high:
         low, high = high, low
     # The model's own `typical_bdt` is a summary it wrote; the offers are prices
-    # it actually read off pages. With enough of them their median is the better
-    # centre, and — unlike a midpoint of low/high — one outlier cannot drag it.
-    # A single counterfeit listing at a fifth of the real price was otherwise
-    # enough to stretch the range until every price looked normal.
+    # it actually read off pages, one per shop. With three shops or more their
+    # median is the better centre, and — unlike a midpoint of low/high — one
+    # outlier cannot drag it. A single counterfeit listing at a fifth of the real
+    # price was otherwise enough to stretch the range until every price looked
+    # normal.
     if len(offers) >= 3:
         prices = sorted(o["price_bdt"] for o in offers)
         middle = len(prices) // 2

@@ -117,8 +117,12 @@ def _fmt_bdt(value) -> str:
     return f"{float(value):,.0f}"
 
 
-def _price_narration(our_price, market_price) -> str:
-    """One plain sentence naming both numbers, for the seller to act on."""
+def _price_narration(our_price, market_price, market_high=None) -> str:
+    """One plain sentence naming the numbers, for the seller to act on."""
+    if market_high is not None and market_high > market_price:
+        return (f"Listed at BDT {_fmt_bdt(our_price)}, above the BDT "
+                f"{_fmt_bdt(market_high)} charged by the dearest shop in Bangladesh "
+                f"selling it (most charge about BDT {_fmt_bdt(market_price)}).")
     return (f"Listed at BDT {_fmt_bdt(our_price)}, above the BDT "
             f"{_fmt_bdt(market_price)} other shops in Bangladesh charge for it.")
 
@@ -1203,7 +1207,10 @@ class GeminiPriceChecker:
 
     The market figure comes from a live Google Search run through Gemini. Only
     *overpricing* is a finding: undercutting the market is a seller's own call,
-    not an error, so it reports clean like any correctly priced listing.
+    not an error, so it reports clean like any correctly priced listing. And
+    "overpriced" means dearer than every shop found, not merely dearer than the
+    middle of them — a marketplace full of clone listings pulls the middle well
+    under what the real shops charge.
 
     Fail-open throughout — no listing price, or no comparable product found in
     Bangladesh, reports clean rather than accusing a seller on missing evidence.
@@ -1247,12 +1254,22 @@ class GeminiPriceChecker:
             # to compare against, so nothing to report.
             return {"price_mismatch": False, "reason": "no_market_price_found"}
 
+        # A listing that sits inside the range of prices actually found is not
+        # overpriced, whatever the median says — if a Bangladeshi shop is asking
+        # more for the same item, the seller is not out of line. Without this an
+        # Ahuja PA speaker listed at BDT 3,250 was flagged against a median of
+        # BDT 1,990 taken from a cluster of marketplace clone listings, while the
+        # real shops carrying it (Trimatrik, Ryans) were asking 3,900–4,500.
+        market_high = market.get("high_bdt")
         allowed_max = market_price * (1 + PRICE_TOLERANCE_PCT)
+        if market_high is not None and market_high > allowed_max:
+            allowed_max = market_high
         exceeded = our_price > allowed_max
 
         print(f"💰 Price check: listing {listing_id} at BDT {our_price:,.0f} vs market "
-              f"BDT {market_price:,.0f}, allowed_max BDT {allowed_max:,.0f}, "
-              f"exceeded={exceeded}")
+              f"BDT {market_price:,.0f} (high BDT {market_high or 0:,.0f}, "
+              f"{len(market.get('offers') or [])} shops), allowed_max BDT "
+              f"{allowed_max:,.0f}, exceeded={exceeded}")
 
         if not exceeded:
             return {"price_mismatch": False}
@@ -1262,8 +1279,12 @@ class GeminiPriceChecker:
             "our_price_bdt": round(our_price, 2),
             "market_price_bdt": market_price,
             "difference_pct": round((our_price - market_price) / market_price * 100, 1),
-            "narration": _price_narration(our_price, market_price),
+            "narration": _price_narration(our_price, market_price, market_high),
         }
+        # The top of the range is what the listing had to clear to be flagged, so
+        # a moderator can see the comparison the verdict was actually made on.
+        if market_high is not None:
+            response["market_high_bdt"] = market_high
         # BDStall's error catalog has no price entry yet, so the id is only
         # reported once one is configured — see PRICE_MISMATCH_ERROR_ID.
         if PRICE_MISMATCH_ERROR_ID is not None:
