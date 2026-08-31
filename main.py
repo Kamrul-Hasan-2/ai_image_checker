@@ -103,6 +103,17 @@ try:
     PRICE_TOLERANCE_PCT = float(os.environ["PRICE_TOLERANCE_PCT"])
 except (KeyError, ValueError):
     PRICE_TOLERANCE_PCT = 0.25
+# A percentage alone is far too tight on cheap goods: 25% of a BDT 300 band top
+# is BDT 75, so an OSRAM 20W lamp listed at 384 against a 297–300 band was
+# flagged over 84 taka — a gap no moderator would act on and no seller would be
+# asked to correct. So allow a flat absolute slack as well and flag only when the
+# price clears BOTH limits. On anything expensive the percentage is much the
+# larger of the two, so this changes nothing there — it only stops the nuisance
+# flags on small-ticket listings.
+try:
+    PRICE_ABSOLUTE_SLACK_BDT = float(os.environ["PRICE_ABSOLUTE_SLACK_BDT"])
+except (KeyError, ValueError):
+    PRICE_ABSOLUTE_SLACK_BDT = 150.0
 # BDStall's error catalog has no price entry yet. Until one exists this stays
 # unset and the response carries a verdict without claiming a catalog id — a
 # made-up id would be filed against sellers under the wrong reason.
@@ -110,6 +121,16 @@ try:
     PRICE_MISMATCH_ERROR_ID = int(os.environ["PRICE_MISMATCH_ERROR_ID"])
 except (KeyError, ValueError):
     PRICE_MISMATCH_ERROR_ID = None
+
+
+def _allowed_max_price_bdt(reference: float) -> float:
+    """
+    Highest listed price still accepted against a market band topping out at
+    `reference` BDT — the more generous of the percentage tolerance and the
+    absolute slack.
+    """
+    return max(reference * (1 + PRICE_TOLERANCE_PCT),
+               reference + PRICE_ABSOLUTE_SLACK_BDT)
 
 
 def _fmt_bdt(value) -> str:
@@ -1268,7 +1289,7 @@ class GeminiPriceChecker:
         # asking 3,900–4,500, and a wall clock at BDT 416 against a median of 85
         # while the band was 299–409.
         market_ceiling = max(p for p in (market_typical, market_high) if p is not None)
-        allowed_max = market_ceiling * (1 + PRICE_TOLERANCE_PCT)
+        allowed_max = _allowed_max_price_bdt(market_ceiling)
         exceeded = our_price > allowed_max
 
         print(f"💰 Price check: listing {listing_id} at BDT {our_price:,.0f} vs market band "
