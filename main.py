@@ -95,9 +95,9 @@ def _allowed_max_weight_kg(reference: float) -> float:
                reference + WEIGHT_ABSOLUTE_SLACK_KG)
 
 
-# Market-price check: how far above the going rate a listing may sit before it
-# is flagged. Wide on purpose — real shops differ on the same item by a third
-# (warranty, import channel, stock age and bundled accessories all move the
+# Market-price check: how far above the TOP of the market band a listing may sit
+# before it is flagged. Wide on purpose — real shops differ on the same item by a
+# third (warranty, import channel, stock age and bundled accessories all move the
 # number), so only a price clear of this margin is worth a human's attention.
 try:
     PRICE_TOLERANCE_PCT = float(os.environ["PRICE_TOLERANCE_PCT"])
@@ -117,12 +117,12 @@ def _fmt_bdt(value) -> str:
     return f"{float(value):,.0f}"
 
 
-def _price_narration(our_price, market_price, market_high=None) -> str:
+def _price_narration(our_price, market_price, market_low=None, market_high=None) -> str:
     """One plain sentence naming the numbers, for the seller to act on."""
-    if market_high is not None and market_high > market_price:
+    if market_low is not None and market_high is not None and market_low < market_high:
         return (f"Listed at BDT {_fmt_bdt(our_price)}, above the BDT "
-                f"{_fmt_bdt(market_high)} charged by the dearest shop in Bangladesh "
-                f"selling it (most charge about BDT {_fmt_bdt(market_price)}).")
+                f"{_fmt_bdt(market_low)}–{_fmt_bdt(market_high)} other shops in "
+                f"Bangladesh charge for it.")
     return (f"Listed at BDT {_fmt_bdt(our_price)}, above the BDT "
             f"{_fmt_bdt(market_price)} other shops in Bangladesh charge for it.")
 
@@ -1207,10 +1207,11 @@ class GeminiPriceChecker:
 
     The market figure comes from a live Google Search run through Gemini. Only
     *overpricing* is a finding: undercutting the market is a seller's own call,
-    not an error, so it reports clean like any correctly priced listing. And
-    "overpriced" means dearer than every shop found, not merely dearer than the
-    middle of them — a marketplace full of clone listings pulls the middle well
-    under what the real shops charge.
+    not an error, so it reports clean like any correctly priced listing. And the
+    comparison is against the whole band of prices found, not its middle: a
+    listing inside the band, or a margin above its top, is priced normally. One
+    stray marketplace listing is enough to drag the middle far under what the
+    real shops charge, and a seller must not be accused over that.
 
     Fail-open throughout — no listing price, or no comparable product found in
     Bangladesh, reports clean rather than accusing a seller on missing evidence.
@@ -1246,43 +1247,52 @@ class GeminiPriceChecker:
         if not market.get("_lookup_ok"):
             raise HTTPException(status_code=502, detail="Gemini price lookup failed")
 
-        # The median of the shop prices actually found, so one outlier listing
-        # cannot move it — see gemini_price_service.
-        market_price = market.get("typical_bdt")
-        if not market.get("found") or not market_price:
+        # The band the same product is actually selling at, plus the median of
+        # the shop prices found within it — see gemini_price_service.
+        market_low = market.get("low_bdt")
+        market_high = market.get("high_bdt")
+        market_typical = market.get("typical_bdt")
+        if not market.get("found") or not market_typical:
             # The search ran and found no comparable Bangladeshi listing. Nothing
             # to compare against, so nothing to report.
             return {"price_mismatch": False, "reason": "no_market_price_found"}
 
-        # A listing that sits inside the range of prices actually found is not
-        # overpriced, whatever the median says — if a Bangladeshi shop is asking
-        # more for the same item, the seller is not out of line. Without this an
-        # Ahuja PA speaker listed at BDT 3,250 was flagged against a median of
-        # BDT 1,990 taken from a cluster of marketplace clone listings, while the
-        # real shops carrying it (Trimatrik, Ryans) were asking 3,900–4,500.
-        market_high = market.get("high_bdt")
-        allowed_max = market_price * (1 + PRICE_TOLERANCE_PCT)
-        if market_high is not None and market_high > allowed_max:
-            allowed_max = market_high
+        # The market is a band, not a point, and its middle is only trustworthy
+        # when the shops found agree. So the listing is held against the TOP of
+        # the band: inside it, or within the tolerance above it, is priced
+        # normally — only a price clear of the whole market is a finding.
+        #
+        # Both false flags this rule exists for came from one stray cheap listing
+        # dragging the middle under the real shops: an Ahuja PA speaker at BDT
+        # 3,250 measured against a median of 1,990 while Trimatrik and Ryans were
+        # asking 3,900–4,500, and a wall clock at BDT 416 against a median of 85
+        # while the band was 299–409.
+        market_ceiling = max(p for p in (market_typical, market_high) if p is not None)
+        allowed_max = market_ceiling * (1 + PRICE_TOLERANCE_PCT)
         exceeded = our_price > allowed_max
 
-        print(f"💰 Price check: listing {listing_id} at BDT {our_price:,.0f} vs market "
-              f"BDT {market_price:,.0f} (high BDT {market_high or 0:,.0f}, "
-              f"{len(market.get('offers') or [])} shops), allowed_max BDT "
-              f"{allowed_max:,.0f}, exceeded={exceeded}")
+        print(f"💰 Price check: listing {listing_id} at BDT {our_price:,.0f} vs market band "
+              f"BDT {market_low or 0:,.0f}–{market_high or 0:,.0f} (median "
+              f"{market_typical:,.0f}, {len(market.get('offers') or [])} shops), "
+              f"allowed_max BDT {allowed_max:,.0f}, exceeded={exceeded}")
 
         if not exceeded:
             return {"price_mismatch": False}
 
+        # `market_price_bdt` is the figure the seller is shown, so it is the one
+        # the verdict was made on — the top of the band. Quoting the median there
+        # would have told the wall-clock seller the market was BDT 85 while shops
+        # were charging up to 409. The band itself follows as evidence.
         response: Dict[str, Any] = {
             "price_mismatch": True,
             "our_price_bdt": round(our_price, 2),
-            "market_price_bdt": market_price,
-            "difference_pct": round((our_price - market_price) / market_price * 100, 1),
-            "narration": _price_narration(our_price, market_price, market_high),
+            "market_price_bdt": market_ceiling,
+            "difference_pct": round((our_price - market_ceiling) / market_ceiling * 100, 1),
+            "narration": _price_narration(our_price, market_ceiling, market_low, market_high),
+            "market_typical_bdt": market_typical,
         }
-        # The top of the range is what the listing had to clear to be flagged, so
-        # a moderator can see the comparison the verdict was actually made on.
+        if market_low is not None:
+            response["market_low_bdt"] = market_low
         if market_high is not None:
             response["market_high_bdt"] = market_high
         # BDStall's error catalog has no price entry yet, so the id is only
